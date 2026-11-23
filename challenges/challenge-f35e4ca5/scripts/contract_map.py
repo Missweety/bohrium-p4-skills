@@ -267,19 +267,106 @@ def finalize_result(result, contract, case_id=None):
     return result, missing
 
 
+def _parsed_payload(doc):
+    """把抽取内核的行级结构落进 parsed：章节、表格逐行逐列、图注、坐标轴。"""
+    units = [{"id": u["id"], "title": u["title"], "role": u["role"],
+              "page": u["page_start"], "words": u["words"]}
+             for u in doc.get("units", [])]
+    tables = []
+    for t in doc.get("tables", []):
+        if not t.get("rows"):
+            if not t.get("caption"):
+                continue
+            tables.append({"id": t["id"], "page": t.get("page"),
+                           "caption": t.get("caption") or "",
+                           "caption_anchor": t.get("caption_anchor"),
+                           "layout": t.get("layout"),
+                           "header": [], "rows": [], "row_count": 0,
+                           "note": t.get("note", "table body not segmented")})
+            continue
+        tables.append({
+            "id": t["id"], "page": t.get("page"),
+            "caption": t.get("caption") or "",
+            "caption_anchor": t.get("caption_anchor"),
+            "layout": t.get("layout"),
+            "header": t.get("header", []),
+            "rows": t.get("rows", []),
+            "row_count": t.get("data_rows", len(t.get("rows", []))),
+        })
+    figures = [{
+        "id": c.get("id"), "page": c.get("page"), "anchor": c.get("anchor"),
+        "kind": c.get("kind"), "label": c.get("label"), "title": c.get("title"),
+        "text": c.get("text"), "n": c.get("n"), "error": c.get("error"),
+        "mean_reported": c.get("mean_reported"),
+        "significance": c.get("significance"),
+        "significance_note": c.get("significance_note"),
+        "p_value": c.get("p_value"), "test": c.get("test"),
+    } for c in doc.get("captions", []) if c.get("kind") == "figure"]
+    axes = doc.get("axes", [])
+    sample_sizes = []
+    for f in figures:
+        if f.get("n") is not None and str(f["n"]) not in sample_sizes:
+            sample_sizes.append(str(f["n"]))
+    payload = {"units": units, "tables": tables, "figures": figures, "axes": axes,
+               "sample_sizes": sample_sizes, "source": "doc_extract"}
+    gaps = [name for name, val in (("tables", tables), ("figures", figures),
+                                   ("axes", axes)) if not val]
+    if gaps:
+        payload["extraction_gaps"] = gaps
+    return payload
+
+
+def _evidence_payload(doc, extra):
+    """证据条目：字段行 + 表格逐行 + 图注 + 坐标轴 + 章节标题，全部带锚点与逐字引文。"""
+    out = []
+    rows = (extra or {}).get("field_results")
+    if isinstance(rows, list):
+        for r in rows:
+            if r.get("status") != "reported":
+                continue
+            out.append({"anchor": r.get("paragraph_id") or "",
+                        "quote": r.get("quote") or "",
+                        "kind": "field_evidence",
+                        "field_id": r.get("field_id")})
+    for t in doc.get("tables", []):
+        if t.get("header") and t.get("header_quote"):
+            out.append({"anchor": t.get("header_anchor") or "",
+                        "quote": t["header_quote"], "kind": "table_header",
+                        "table_id": t["id"],
+                        "columns": t.get("header", [])})
+        for r in t.get("rows", []):
+            out.append({"anchor": r.get("page_anchor") or "",
+                        "quote": r.get("row_quote") or "",
+                        "kind": "table_row", "table_id": t["id"],
+                        "row": r.get("row"), "row_anchor": r.get("anchor"),
+                        "cells": r.get("cells", [])})
+    for c in doc.get("captions", []):
+        out.append({"anchor": c["anchor"], "quote": c["text"], "kind": "caption",
+                    "caption_id": c.get("id"), "caption_kind": c.get("kind"),
+                    "label": c.get("label")})
+    for ax in doc.get("axes", []):
+        out.append({"anchor": ax.get("anchor") or "", "quote": ax.get("quote") or "",
+                    "kind": "axis_definition", "axis": ax.get("axis"),
+                    "label": ax.get("label"), "unit": ax.get("unit"),
+                    "scale": ax.get("scale"), "basis": ax.get("basis")})
+    for u in doc.get("units", [])[:20]:
+        out.append({"anchor": "p.%d/%s" % (u["page_start"], u["id"]),
+                    "quote": u["title"], "kind": "section_heading"})
+    return out
+
+
 def _value_from_slot(slot, doc, extra=None):
     """按语义槽位从抽取结果里取一个合理的值（带证据）。"""
     extra = extra or {}
     if slot == "parsed":
-        return {"units": [{"id": u["id"], "title": u["title"], "role": u["role"],
-                           "page": u["page_start"], "words": u["words"]}
-                          for u in doc.get("units", [])],
-                "source": "doc_extract"}
+        return _parsed_payload(doc)
     if slot == "extracted":
         return {"numbers": doc.get("numbers", [])[:200],
                 "tables": [{"id": t["id"], "rows": len(t["rows"]),
                             "caption": t.get("caption", "")} for t in doc.get("tables", [])],
                 "captions": doc.get("captions", []),
+                "figures": doc.get("figures", []),
+                "axes": doc.get("axes", []),
                 "source": "doc_extract"}
     if slot == "sections":
         return [{"id": u["id"], "title": u["title"], "role": u["role"],
@@ -292,36 +379,31 @@ def _value_from_slot(slot, doc, extra=None):
                           for r in t["rows"][:60]]}
                 for t in doc.get("tables", [])]
     if slot == "figures":
-        return doc.get("captions", [])
+        return doc.get("figures") or doc.get("captions", [])
     if slot == "evidence":
-        out = []
-        rows = extra.get("field_results")
-        if isinstance(rows, list):
-            for r in rows:
-                if r.get("status") != "reported":
-                    continue
-                out.append({"anchor": r.get("paragraph_id") or "",
-                            "quote": r.get("quote") or "",
-                            "kind": "field_evidence",
-                            "field_id": r.get("field_id")})
-        for t in doc.get("tables", []):
-            if t.get("caption"):
-                out.append({"anchor": "p.%d/%s" % (t["page"], t["id"]),
-                            "quote": t["caption"], "kind": "table_caption"})
-        for c in doc.get("captions", []):
-            out.append({"anchor": c["anchor"], "quote": c["text"], "kind": "caption"})
-        for u in doc.get("units", [])[:20]:
-            out.append({"anchor": "p.%d/%s" % (u["page_start"], u["id"]),
-                        "quote": u["title"], "kind": "section_heading"})
-        return out
+        return _evidence_payload(doc, extra)
     if slot == "coverage":
         pages = len(doc.get("pages", []))
         chars = sum(p["chars"] for p in doc.get("pages", []))
-        return {"pages_extracted": pages, "chars_extracted": chars,
-                "units": len(doc.get("units", [])),
-                "tables": len(doc.get("tables", [])),
-                "numbers": len(doc.get("numbers", [])),
-                "tier": doc.get("meta", {}).get("tier", "unknown")}
+        tables = doc.get("tables", [])
+        table_rows = sum(len(t.get("rows") or []) for t in tables)
+        table_values = sum(
+            1 for t in tables for r in (t.get("rows") or [])
+            for v in (r.get("values") or {}).values()
+            if isinstance(v, dict) and isinstance(v.get("value"), (int, float)))
+        captions = doc.get("captions", [])
+        coverage = {"pages_extracted": pages, "chars_extracted": chars,
+                    "units": len(doc.get("units", [])),
+                    "tables": len(tables),
+                    "table_rows": table_rows,
+                    "table_numeric_values": table_values,
+                    "captions": len(captions),
+                    "figure_captions": len([c for c in captions
+                                            if c.get("kind") == "figure"]),
+                    "axes": len(doc.get("axes", [])),
+                    "numbers": len(doc.get("numbers", [])),
+                    "tier": doc.get("meta", {}).get("tier", "unknown")}
+        return coverage
     if slot in ("fields", "items", "results"):
         # 字段表驱动抽取的结果优先落到「字段/条目/结果」类槽位
         rows = extra.get("field_results")

@@ -96,7 +96,27 @@ CAPTION_RE = re.compile(
     r"([0-9]+|[ivxlc]+|[一二三四五六七八九十]+)",
     re.I,
 )
+CAPTION_LABEL_RE = re.compile(
+    r"^\s*(fig(?:ure)?\.?|table|tab\.?|chart|scheme|algorithm|图|表|附图|附表)\s*"
+    r"([0-9]+|[ivxlc]+|[一二三四五六七八九十]+)\s*"
+    r"(?:[|:：.、\-–—]\s*)?(.*)$",
+    re.I,
+)
+MD_EMPH_RE = re.compile(r"\*\*|__")
 TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+SEP_CELL_RE = re.compile(r"^:?-{2,}:?$")
+CAPTION_N_RE = re.compile(r"\bn\s*=\s*(\d+)\b", re.I)
+CAPTION_P_RE = re.compile(r"\bp\s*([<>=≤≥])\s*(\d+(?:\.\d+)?)", re.I)
+CAPTION_ERR_RE = re.compile(r"\bs\.?\s*e\.?\s*m\.?\b", re.I)
+CAPTION_SD_RE = re.compile(r"\bs\.?\s*d\.?\b", re.I)
+CAPTION_CI_RE = re.compile(r"\b(?:95\s*%\s*)?CI\b", re.I)
+CAPTION_TEST_RE = re.compile(
+    r"(?:(?:two-sided|one-sided|two-tailed|one-tailed)\s+)?"
+    r"(?:Student'?s?\s+)?"
+    r"(?:t-test|ANOVA|Mann[-\u2013]Whitney(?:\s+U)?\s+test|Wilcoxon\s+\w+\s+test|"
+    r"chi-square\s+test|Friedman\s+test|Kruskal[-\u2013]Wallis\s+test)",
+    re.I,
+)
 MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 TEX_SECTION_RE = re.compile(r"\\(?:sub)*section\*?\{([^}]*)\}")
 TEX_FIGURE_RE = re.compile(r"\\begin\{(figure|table)\*?\}(.*?)\\end\{\1\*?\}", re.S)
@@ -298,13 +318,23 @@ def extract_any(path, workdir, extractor="auto", max_pages=MAX_PAGES):
 
 
 # ------------------------------------------------------------------ structure
+def strip_emphasis(text):
+    """去掉 Markdown 粗体/斜体包裹，保留单个 * 这类显著性标记。"""
+    return MD_EMPH_RE.sub("", (text or "")).strip()
+
+
+def caption_match(line):
+    """图注/表注行匹配（容忍 **Figure 1 | ...** 这种加粗写法）。"""
+    return CAPTION_RE.match(strip_emphasis(line))
+
+
 def classify_line(line):
     s = line.strip()
     if not s:
         return None
     if MD_HEADING_RE.match(s):
         return ("heading", MD_HEADING_RE.match(s).group(2).strip(), len(MD_HEADING_RE.match(s).group(1)))
-    if CAPTION_RE.match(s):
+    if caption_match(s):
         return ("caption", s, 0)
     if TABLE_ROW_RE.match(s):
         return ("table_row", s, 0)
@@ -445,20 +475,132 @@ def _looks_like_table_row(line):
     if len(cells) < 2:
         return False
     numeric = sum(1 for c in cells if re.search(r"\d", c))
-    return numeric >= 2 or (len(cells) >= 3 and numeric >= 1)
+    if numeric >= 2 or (len(cells) >= 3 and numeric >= 1):
+        return True
+    # 纯文本表头（如 Dose (µM)  Viability (%)  s.e.m.  n  Significance）：
+    # 多列且每列都很短，视为表头行，供后续行挂列名/单位。
+    return len(cells) >= 3 and all(len(c) <= 40 for c in cells)
 
 
-def mine_tables(pages):
-    """抽取表格行。
+def _parse_caption(text):
+    """解析图注/表注：编号、样本量、误差类型、显著性标记、检验方法、p 值。"""
+    plain = strip_emphasis(text)
+    m = CAPTION_LABEL_RE.match(plain)
+    if not m:
+        return {"kind": "other", "label": None}
+    token = (m.group(1) or "").lower()
+    kind = ("figure" if token.startswith(("fig", "chart", "scheme", "algorithm", "图", "附图"))
+            else "table")
+    num = m.group(2)
+    body = (m.group(3) or "").strip()
+    n = CAPTION_N_RE.search(plain)
+    error = None
+    if CAPTION_ERR_RE.search(plain):
+        error = "s.e.m."
+    elif CAPTION_SD_RE.search(plain):
+        error = "s.d."
+    elif CAPTION_CI_RE.search(plain):
+        error = "CI"
+    p = CAPTION_P_RE.search(plain)
+    test = CAPTION_TEST_RE.search(plain)
+    marks = []
+    for mark in re.findall(r"\*{1,3}", plain):
+        if mark not in marks:
+            marks.append(mark)
+    if re.search(r"\bn\.s\.\b", plain, re.I) and "n.s." not in marks:
+        marks.append("n.s.")
+    return {
+        "kind": kind,
+        "label": "%s %s" % ("Figure" if kind == "figure" else "Table", num),
+        "title": body,
+        "n": int(n.group(1)) if n else None,
+        "error": error,
+        "mean_reported": bool(re.search(r"\bmean\b", plain, re.I)),
+        "significance": marks,
+        "significance_note": p.group(0) if p else None,
+        "p_value": p.group(2) if p else None,
+        "test": test.group(0) if test else None,
+    }
 
-    两种版式：
-      1) Markdown/管道式 `| a | b |`
-      2) pdftotext -layout 的空格对齐表格（2+ 空格分列）
-    每行带 p.N/tab.M/row.K 锚点；只有标题没有行的表也要保留（caption-only），
-    以便上层标注"表格正文未能自动切分"，而不是假装表格已解析。
+
+def _coerce_number(raw):
+    """单元格转数值：只接受纯数字（可带比较符/千分位），否则原样返回字符串。"""
+    text = (raw or "").strip().replace(",", "")
+    m = re.match(r"^[<>~≥≤≈]?\s*([-+]?\d+(?:\.\d+)?)\s*$", text)
+    if not m:
+        return None
+    num = float(m.group(1))
+    return int(num) if num.is_integer() and "." not in m.group(1) else num
+
+
+def _header_units(cells):
+    """表头识别：列名、单位（如 Dose (µM)）与语义角色。"""
+    header = []
+    for idx, cell in enumerate(cells, 1):
+        raw = (cell or "").strip()
+        name, unit = raw, None
+        m = re.match(r"^(.+?)\s*[（(]([^)）]+)[)）]\s*$", raw)
+        if m:
+            name, unit = m.group(1).strip(), m.group(2).strip()
+        low = name.lower()
+        if any(k in low for k in ("dose", "concentration", "time", "wavelength")):
+            role = "x_axis"
+        elif "s.e.m" in low or low in ("sem", "s.d", "s.d.", "sd") or "error" in low or low == "ci":
+            role = "error"
+        elif low in ("n", "n=") or "sample size" in low:
+            role = "sample_size"
+        elif "significan" in low or low.startswith("p") or "p-value" in low:
+            role = "significance"
+        elif unit == "%" or any(k in low for k in
+                                ("viability", "response", "signal", "intensity",
+                                 "absorbance", "value", "mean")):
+            role = "y_axis"
+        else:
+            role = "value"
+        header.append({"index": idx, "name": name, "unit": unit, "role": role, "raw": raw})
+    return header
+
+
+def _row_values(cells, header, row_anchor, quote):
+    values = {}
+    for i, cell in enumerate(cells):
+        h = header[i] if i < len(header) else {"name": "col%d" % (i + 1), "unit": None, "role": "value"}
+        num = _coerce_number(cell)
+        values[h["name"]] = {
+            "value": num if num is not None else (cell or "").strip(),
+            "raw": (cell or "").strip(),
+            "unit": h.get("unit"),
+            "role": h.get("role"),
+            "anchor": row_anchor,
+            "quote": quote,
+        }
+    return values
+
+
+def mine_tables(pages, captions=None):
+    """抽取表格行（Markdown 管道表 + pdftotext -layout 空格对齐表）。
+
+    输出每行每列的值：header（列名/单位/角色）、rows（row、anchor、cells、
+    values{列名: {value, raw, unit, anchor, quote}}）。锚点：
+      tab.M/row.K          数据行（K 从 1 起，表头行不计）
+      p.N/tab.M/row.K      带页码的可复核锚点（evidence 使用）
+      p.N/tab.M            表头
+    只有标题没有行的表保留为 caption-only，并明确标注未切分，不假装已解析。
     """
+    captions = captions or []
+    cap_by_text = {(c.get("text") or "").strip(): c for c in captions}
     tables = []
     cur = None
+    pending_caption = None
+
+    def new_caption_only(cap):
+        return {"id": None, "page": cap.get("page", 0),
+                "caption": cap.get("text") or "",
+                "caption_anchor": cap.get("anchor"),
+                "caption_id": cap.get("id"),
+                "rows": [], "layout": "caption-only", "_raw_rows": [],
+                "note": "caption detected but table body not segmented; read the cited page"}
+
     for pno, page in enumerate(pages, 1):
         for line in page.split("\n"):
             s = line.strip()
@@ -468,38 +610,144 @@ def mine_tables(pages):
                 cells = ([c.strip() for c in s.strip("|").split("|")] if pipe
                          else _split_layout_cells(line))
                 if cur is None:
-                    cur = {"id": "tab.%d" % (len(tables) + 1), "page": pno,
-                           "caption": "", "rows": [], "layout": "pipe" if pipe else "layout"}
-                cur["rows"].append({"row": len(cur["rows"]) + 1, "page": pno,
-                                    "cells": cells,
-                                    "anchor": "p.%d/%s/row.%d" % (pno, cur["id"], len(cur["rows"]) + 1)})
+                    reused = False
+                    if (pending_caption is not None and pending_caption in tables
+                            and not pending_caption["_raw_rows"]):
+                        cur = pending_caption
+                        cur["layout"] = "pipe" if pipe else "layout"
+                        cur.pop("note", None)
+                        reused = True
+                    else:
+                        cur = {"id": None, "page": pno, "caption": "",
+                               "caption_anchor": None, "caption_id": None,
+                               "rows": [], "layout": "pipe" if pipe else "layout",
+                               "_raw_rows": []}
+                    if not reused:
+                        tables.append(cur)
+                cur["_raw_rows"].append({"page": pno, "raw": s, "cells": cells})
+                pending_caption = None
             else:
-                if cur is not None and len(cur["rows"]) >= 2:
-                    tables.append(cur)
                 cur = None
-                if CAPTION_RE.match(s):
-                    tables.append({"id": "tab.%d" % (len(tables) + 1), "page": pno,
-                                   "caption": s, "rows": [],
-                                   "layout": "caption-only",
-                                   "note": "caption detected but table body not segmented; read the cited page"})
-    if cur is not None and len(cur["rows"]) >= 2:
-        tables.append(cur)
+                match = caption_match(s)
+                if match:
+                    cap = cap_by_text.get(s)
+                    if cap is None:
+                        parsed = _parse_caption(s)
+                        cap = {"id": None, "page": pno, "text": s,
+                               "anchor": "p.%d/cap.?" % pno, **parsed}
+                    if cap.get("kind") == "table":
+                        pending_caption = new_caption_only(cap)
+                        tables.append(pending_caption)
+
     for idx, t in enumerate(tables, 1):
         t["id"] = "tab.%d" % idx
-        for r in t["rows"]:
-            r["anchor"] = "p.%d/%s/row.%d" % (r["page"], t["id"], r["row"])
+        if t["layout"] == "caption-only":
+            continue
+        raw_rows = t["_raw_rows"]
+        sep_idx = None
+        for i, rr in enumerate(raw_rows):
+            cells = [c for c in rr["cells"] if c.strip()]
+            if cells and all(SEP_CELL_RE.match(c.strip()) for c in cells):
+                sep_idx = i
+                break
+        header_cells, header_quote = None, ""
+        if sep_idx is not None and sep_idx >= 1:
+            header_cells = raw_rows[sep_idx - 1]["cells"]
+            header_quote = raw_rows[sep_idx - 1]["raw"]
+            data_rows = raw_rows[sep_idx + 1:]
+        elif raw_rows and not any(re.search(r"\d", c) for c in raw_rows[0]["cells"]):
+            header_cells = raw_rows[0]["cells"]
+            header_quote = raw_rows[0]["raw"]
+            data_rows = raw_rows[1:]
+        else:
+            data_rows = raw_rows
+        header = _header_units(header_cells) if header_cells else []
+        t["header"] = header
+        t["header_quote"] = header_quote
+        t["header_anchor"] = "p.%d/%s" % (t["page"], t["id"]) if header else None
+        rows = []
+        for k, rr in enumerate(data_rows, 1):
+            row_anchor = "%s/row.%d" % (t["id"], k)
+            quote = rr["raw"].strip()
+            rows.append({"row": k, "page": rr["page"], "anchor": row_anchor,
+                         "page_anchor": "p.%d/%s" % (rr["page"], row_anchor),
+                         "raw": rr["raw"], "row_quote": quote,
+                         "cells": rr["cells"],
+                         "values": _row_values(rr["cells"], header, row_anchor, quote)})
+        t["rows"] = rows
+        t["data_rows"] = len(rows)
+        t.pop("_raw_rows", None)
     return tables
 
 
 def mine_captions(pages):
     caps = []
+    seen = set()
     for pno, page in enumerate(pages, 1):
         for line in page.split("\n"):
             s = line.strip()
-            if CAPTION_RE.match(s) and s not in [c["text"] for c in caps]:
-                caps.append({"id": "cap.%d" % (len(caps) + 1), "page": pno,
-                             "text": s, "anchor": "p.%d/cap.%d" % (pno, len(caps) + 1)})
+            if not caption_match(s) or s in seen:
+                continue
+            seen.add(s)
+            parsed = _parse_caption(s)
+            caps.append({"id": "cap.%d" % (len(caps) + 1), "page": pno,
+                         "text": s, "anchor": "p.%d/cap.%d" % (pno, len(caps) + 1),
+                         **parsed})
     return caps
+
+
+def _axis_unit(phrase):
+    for unit in sorted(KNOWN_UNITS, key=len, reverse=True):
+        if len(unit) < 2 and unit != "%":
+            continue
+        if re.search(r"(?<![A-Za-z])%s(?![A-Za-z])" % re.escape(unit), phrase):
+            if unit in ("M", "m", "g", "s", "d", "A", "N", "J", "L", "V", "W", "B"):
+                continue
+            return unit
+    return None
+
+
+def _parse_axis_phrase(axis, phrase, anchor, sentence):
+    scale = "not_reported"
+    if re.search(r"\blog(?:10|2)?\b|\blogarithmic\b", phrase, re.I):
+        scale = "log"
+    elif re.search(r"\blinear\b", phrase, re.I):
+        scale = "linear"
+    label = re.split(r"\s+(?:in|as|on|with|measured)\s+", phrase, 1)[0].strip(" ,.;")
+    return {
+        "axis": axis,
+        "label": label or phrase,
+        "unit": _axis_unit(phrase),
+        "scale": scale,
+        "description": phrase,
+        "basis": "text_statement",
+        "directly_readable_from_figure": False,
+        "tick_values": {"status": "not_reported",
+                        "reason": "图中刻度值需读图/OCR，当前仅用文本层，不臆造"},
+        "anchor": anchor,
+        "quote": sentence,
+    }
+
+
+def mine_axes(units):
+    """从正文/图注抽取 x/y 轴含义、单位、尺度，并标明是正文陈述还是图中直读。"""
+    axes = []
+    seen = set()
+    for u in units:
+        for k, sent in enumerate(split_sentences(u["text"]), 1):
+            for m in re.finditer(r"\b([xy])[- ]axis\b", sent, re.I):
+                axis = m.group(1).lower()
+                if axis in seen:
+                    continue
+                rest = re.split(r"[;.]", sent[m.end():], 1)[0].strip()
+                rest = re.sub(r"^(?:shows?|indicates?|is|represents?|denotes?|plots?|displays?|gives?)\s+",
+                              "", rest, flags=re.I).strip(" ,;")
+                if not rest:
+                    continue
+                seen.add(axis)
+                axes.append(_parse_axis_phrase(
+                    axis, rest, "p.%d/%s/sent.%d" % (u["page_start"], u["id"], k), sent))
+    return axes
 
 
 def build_doc(path, workdir, extractor="auto", max_pages=MAX_PAGES):
@@ -508,13 +756,16 @@ def build_doc(path, workdir, extractor="auto", max_pages=MAX_PAGES):
     meta = dict(meta)
     meta["source_file"] = os.path.basename(path)
     meta["language"] = "zh" if len(CJK_RE.findall(text[:20000])) > 200 else "en"
+    captions = mine_captions(pages)
     doc = {
         "meta": meta,
         "pages": [{"page": i + 1, "chars": len(p)} for i, p in enumerate(pages)],
         "units": units,
         "numbers": mine_numbers(units) if units else [],
-        "tables": mine_tables(pages),
-        "captions": mine_captions(pages),
+        "tables": mine_tables(pages, captions),
+        "captions": captions,
+        "figures": [c for c in captions if c.get("kind") == "figure"],
+        "axes": mine_axes(units) if units else [],
         "text": text,
     }
     if path.lower().endswith(".pdf"):
