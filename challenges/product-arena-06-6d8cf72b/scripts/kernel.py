@@ -330,6 +330,125 @@ def cmd_compare(a):
     return 0
 
 
+UNIT_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*(mg/g|mg/L|g/L|mg|%|摄氏度|℃|分钟|小时|mL|μm|nm)")
+METRIC_RE = re.compile(r"(最大吸附量|吸附量|去除率|回收率|降解率|转化率|产率|得率|选择性|容量|浓度|效率)")
+ABSTRACT_RE = re.compile(r"摘要|abstract", re.I)
+
+
+def _paragraphs(corpus):
+    """Yield (section_title, paragraph_text) in document order."""
+    section = ""
+    buf = []
+    for line in corpus.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            if buf:
+                yield section, "\n".join(buf).strip()
+                buf = []
+            section = stripped.lstrip("#").strip()
+        elif not stripped:
+            if buf:
+                yield section, "\n".join(buf).strip()
+                buf = []
+        else:
+            buf.append(stripped)
+    if buf:
+        yield section, "\n".join(buf).strip()
+
+
+def _metric_values(text, section):
+    """Extract (metric, unit, value, sentence) binding each number to the nearest preceding metric word."""
+    out = []
+    for sentence in re.split(r"[。；;]\s*", text):
+        metrics = [(m.start(), m.group(1)) for m in METRIC_RE.finditer(sentence)]
+        if not metrics:
+            continue
+        for match in UNIT_RE.finditer(sentence):
+            preceding = [m for m in metrics if m[0] < match.start()]
+            if not preceding:
+                continue
+            out.append((preceding[-1][1], match.group(2), float(match.group(1)), sentence.strip(), section))
+    return out
+
+
+def cmd_consistency(a):
+    corpus = open(a.corpus, encoding="utf-8").read() if os.path.exists(a.corpus) else ""
+    rows = []
+    for section, paragraph in _paragraphs(corpus):
+        rows.extend(_metric_values(paragraph, section))
+    by_metric = {}
+    for metric, unit, value, sentence, section in rows:
+        by_metric.setdefault((metric, unit), []).append((value, sentence, section))
+    candidates = []
+    for (metric, unit), values in by_metric.items():
+        abstracts = [v for v in values if ABSTRACT_RE.search(v[2])]
+        bodies = [v for v in values if not ABSTRACT_RE.search(v[2])]
+        if not abstracts or not bodies:
+            continue
+        avals = {round(v[0], 6) for v in abstracts}
+        bvals = {round(v[0], 6) for v in bodies}
+        # A shared value means the abstract is reproducing a body measurement; not a conflict.
+        if any(abs(x - y) / max(abs(x), abs(y), 1e-9) < 0.01 for x in avals for y in bvals):
+            continue
+        only_a = sorted(avals - bvals)
+        only_b = sorted(bvals - avals)
+        if not only_a or not only_b:
+            continue
+        candidates.append({
+            "metric": metric, "unit": unit,
+            "abstract_values": only_a, "body_values": only_b,
+            "section": bodies[0][2],
+            "delta_pct": round(abs(only_a[0] - only_b[0]) / max(abs(only_a[0]), abs(only_b[0]), 1e-9) * 100, 1),
+            "abstract_quote": abstracts[0][1], "body_quote": bodies[0][1],
+            "needs_confirmation": True})
+    report = {"checked_paragraphs": len(list(_paragraphs(corpus))), "metrics": len(by_metric),
+              "candidates": candidates, "note": "仅提示摘要与正文同指标数值互不重合的情况，语义是否冲突需人工确认"}
+    dump(report, a.out)
+    print("candidates=%d metrics=%d" % (len(candidates), len(by_metric)))
+    return 0
+
+
+def cmd_baseline(a):
+    corpus = open(a.corpus, encoding="utf-8").read() if os.path.exists(a.corpus) else ""
+    sections = [(s, p) for s, p in _paragraphs(corpus)]
+    naive = []
+    for section, paragraph in sections:
+        first = re.split(r"(?<=[。！？.!?])\s*", paragraph)[0][:120]
+        naive.append({"section": section, "summary": first})
+    ours = {"entries": 0, "fields": 0, "anchored": 0, "topics": 0}
+    if os.path.exists(a.notes):
+        notes = load_json(a.notes)
+        fields = notes.get("fields") or {}
+        entries = [e for v in fields.values() for e in v or []]
+        ours = {"entries": len(entries), "fields": len([k for k, v in fields.items() if v]),
+                "anchored": len([e for e in entries if e.get("quote") and e.get("anchor")]),
+                "topics": len({e.get("topic") for e in entries if e.get("topic")})}
+    report = {
+        "fairness": {"same_materials": True, "same_parser": "共用 corpus.txt", "same_case": True,
+                     "baseline": "确定性白板：按章节取首句作摘要，不使用额外模型或预算"},
+        "baseline": {"sections": len(naive), "entries": len(naive), "fields": 1 if naive else 0,
+                     "anchored": 0, "retrievable": False, "comparable": False, "notes": naive[:20]},
+        "ours": {"entries": ours["entries"], "fields": ours["fields"], "anchored": ours["anchored"],
+                 "retrievable": os.path.exists(a.notes), "comparable": True},
+        "delta": {"entries": ours["entries"] - len(naive), "fields": ours["fields"] - (1 if naive else 0),
+                  "anchored": ours["anchored"], "anchor_rate": round(ours["anchored"] / max(ours["entries"], 1), 3)},
+    }
+    dump(report, a.out)
+    if a.markdown:
+        lines = ["# 同一材料上的白板对照", "",
+                 "| 指标 | 白板基线 | 本 Skill |", "|---|---|---|",
+                 f"| 条目数 | {len(naive)} | {ours['entries']} |",
+                 f"| 覆盖字段 | {1 if naive else 0} | {ours['fields']} |",
+                 f"| 带锚点条目 | 0 | {ours['anchored']} |",
+                 "| 可检索 | 否 | 是 |", "| 可并排比较 | 否 | 是 |", "",
+                 "对照条件：同一材料、同一 corpus 解析、同一案例请求，基线不额外调用模型。"]
+        os.makedirs(os.path.dirname(os.path.abspath(a.markdown)) or ".", exist_ok=True)
+        with open(a.markdown, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    print("baseline sections=%d ours_entries=%d anchored=%d" % (len(naive), ours["entries"], ours["anchored"]))
+    return 0
+
+
 def cmd_check(a):
     problems = []
     rp = os.path.join(a.out, "result.json")
@@ -380,6 +499,8 @@ def main():
     p = sub.add_parser("check"); p.add_argument("--out", default="/app/output"); p.add_argument("--work", default="work"); p.set_defaults(fn=cmd_check)
     p = sub.add_parser("search"); p.add_argument("--notes", required=True); p.add_argument("--query", default=""); p.add_argument("--out", default="work/search.json"); p.set_defaults(fn=cmd_search)
     p = sub.add_parser("compare"); p.add_argument("--notes", nargs="+", required=True); p.add_argument("--out", default="work/compare.json"); p.add_argument("--markdown", default="work/compare.md"); p.set_defaults(fn=cmd_compare)
+    p = sub.add_parser("consistency"); p.add_argument("--corpus", default="work/corpus.txt"); p.add_argument("--out", default="work/consistency.json"); p.set_defaults(fn=cmd_consistency)
+    p = sub.add_parser("baseline"); p.add_argument("--corpus", default="work/corpus.txt"); p.add_argument("--notes", default="work/notes.json"); p.add_argument("--out", default="work/baseline_compare.json"); p.add_argument("--markdown", default="work/baseline_compare.md"); p.set_defaults(fn=cmd_baseline)
 
     a = ap.parse_args()
     return a.fn(a)

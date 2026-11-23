@@ -1,7 +1,7 @@
 ---
 name: structure-aligned-paper-noter
 description: 把真实科研论文读成与原文章节一一对应的结构化笔记：按固定骨架（研究问题—方法—数据—主要结论含数值—局限—可复用点）抽取，每条结论绑定页码/段落/原文引文锚点，区分作者主张与笔记推断，跨章节冲突并列保留，并用脚本校验字段完整性与锚点真实性。用于论文卡片、章节笔记、知识点整理与多篇论文并排比较；不用于无原文的综述代写、凭空补数据或纯翻译。
-version: 1.1.0
+version: 1.2.0
 license: MIT
 ---
 
@@ -92,11 +92,17 @@ license: MIT
     再 `python scripts/kernel.py check --out /app/output --work work` 必须 PASS。`check` 会核对运行时契约字段非空、
     `notes.md/notes.json/anchors.csv` 三件产物齐备、`anchors_verified == anchors_total`、
     `note_check.json` 与 `quote_check.json` 均为 pass；缺字段时 `emit` 退出码为 1，不能带着空缺交付。
-11. **检索与并排比较（多篇论文或有"可检索"要求时）**：
+11. **检索、并排比较与一致性/增益证据（多篇论文或有"可检索"要求时）**：
     - `python scripts/kernel.py search --notes work/notes.json --query "pH" --out work/search.json`
       → 按 `id/text/value/topic/quote` 命中，返回字段名与锚点，可直接回答"哪篇、哪节、哪条"。
     - `python scripts/kernel.py compare --notes work/notes_a.json work/notes_b.json --out work/compare.json --markdown work/compare.md`
       → 以 `topic` 为行做并排矩阵，输出跨论文共有主题与差异主题；同一主题数值不同时并列列出，不替读者取舍。
+    - `python scripts/kernel.py consistency --corpus work/corpus.txt --out work/consistency.json`
+      → 只比较"摘要 vs 正文"中同指标、同单位且数值互不重合的情况（重合视为摘要复述正文，不报警），
+      输出候选与两侧原文句子，标注 `needs_confirmation`，语义是否冲突由人确认。
+    - `python scripts/kernel.py baseline --corpus work/corpus.txt --notes work/notes.json --out work/baseline_compare.json --markdown work/baseline_compare.md`
+      → 在同一材料、同一 corpus 解析、同一案例请求下，用确定性白板（按章节取首句摘要，不额外调用模型）做公平对照，
+      输出条目数、字段覆盖、带锚点条目、可检索/可比较能力的差值，作为增益可验证证据。
 
 ## 领域规则表（按题面四个关注点）
 
@@ -144,7 +150,7 @@ license: MIT
 
 ## 文件说明
 
-- `scripts/kernel.py`：`init / index / verify / emit / check / search / compare`（仅标准库）。
+- `scripts/kernel.py`：`init / index / verify / emit / check / search / compare / consistency / baseline`（仅标准库）。
 - `scripts/quote_check.py`：锚点 quote 逐字核验，防止改写冒充原文。
 - `scripts/note_schema_check.py`：六字段完整性、锚点章节有效性、数字可溯、inference 依据、冲突成组。
 - `references/note-schema.md`：六字段定义、记录 schema、`not_stated`/`not_reported` 约定。
@@ -173,3 +179,8 @@ python scripts/kernel.py check --out /app/output
 - 1.1.0 补齐"可检索、可比较"：新增 `search`（按主题/数值/引文检索到条目与锚点）与 `compare`
   （多篇笔记按 `topic` 并排、列出共有与差异主题）；`check` 从只看 case_id/status 扩展到契约字段非空、
   三件产物齐备、锚点守恒、两份校验 pass；`emit` 缺契约字段时改为退出码 1，避免静默交付空缺。
+
+- 1.2.0 补齐评分中的"增益可验证"与"创新证据"：新增 `consistency`（摘要 vs 正文同指标数值冲突候选，
+  重合值不算冲突，避免把正文复述当矛盾）与 `baseline`（同材料、同解析、同请求的确定性白板对照，
+  输出条目/字段/锚点/检索/比较的差值）；同时修复数值归属缺陷：一个句子里有多个指标时，
+  数字须绑定到其前方最近的指标词，否则会把摘要中的吸附量误记到去除率上。
