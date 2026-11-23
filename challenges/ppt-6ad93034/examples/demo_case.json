@@ -1,0 +1,15 @@
+{
+  "_note": "示例输入（合成）。真实案例由平台在评测时提供，参赛者不自带正式案例。",
+  "case_id": "example-case-id",
+  "output_contract": {
+    "required": [
+      "parsed",
+      "evidence",
+      "coverage",
+      "status"
+    ]
+  },
+  "materials": [
+    "<示例材料文件名>"
+  ]
+}
