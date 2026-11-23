@@ -8,3 +8,5 @@ render 接受 evidence.json 与 Agent 读原文后填写的 reviewed.json，输�
 缺材料时提交诚实 partial/failed 和具体原因。外部资源先按清单解析，再显式放入实际材料目录，记录其原始来源。
 当前 case 的 output_contract 优先，Agent 应读取 schema 的全部字段与类型，针对实际任务完成最终 JSON。
 机器核验通过只支持原文绑定与结构通过，语义、因果、统计适用条件由 Agent 核实。
+
+`selfcheck` 子命令（`--result /app/output/result.json --case /input/case.json --evidence /app/work/audit/evidence.json --out /app/work`）在交付前检查：运行时 `output_contract` 的必填字段是否齐全、finding 引文是否仍逐字存在于所引段落、六个 facet 是否有覆盖记录。不通过时退出码 1，并在 `selfcheck.json` 列出原因；通过不代表语义正确。

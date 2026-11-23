@@ -5,7 +5,7 @@ description: 逐条核验论文事实与引用支持，绑定稿件和来源原�
 
 # 引用与事实核验
 
-版本 1.1.0
+版本 1.2.0
 
 ## 三种调用请求
 
@@ -33,13 +33,20 @@ description: 逐条核验论文事实与引用支持，绑定稿件和来源原�
 
 Python 3.10+，无必装 Python 第三方包。PDF 文本抽取使用已有 pdftotext，DOCX 用标准库，扫描页按现场工具渲染或 OCR 并核对数字。依赖不可用时记录具体文件、页和限制。读完整 /input/case.json、任务和 environment/resources.yaml（存在时），从实际声明找到稿件、被引原文、补充材料和数据。清单相对路径从清单目录解析。正式案例只在运行时取得。
 
-用实际材料目录生成证据索引与待填审查单。初次命令产出的是输入证据和检查模板，随后由 Agent 阅读原文并写出本题科学判断。`prepare` 已按真实段落自动预填引用类候选（正文 [n] 引用在可解析书目中缺条目，或完全无可解析书目），候选一律标注“需语义确认”，Agent 必须保留、修正或说明不采纳的理由，不能把候选数量当作结论数量。
+用实际材料目录生成证据索引与待填审查单。初次命令产出的是输入证据和检查模板，随后由 Agent 阅读原文并写出本题科学判断。`prepare` 已按真实段落自动预填三类候选，一律标注“需语义确认”，Agent 必须保留、修正或说明不采纳的理由，不能把候选数量当作结论数量：
+
+- 引用类：正文 [n] 缺失对应书目条目、或完全无可解析书目。
+- 数值类：同段自称显著但 p≥0.05；同一来源出现多个样本量 n；同段互斥百分比合计超过 100%。
+- 来源类：出现撤稿、勘误/更正或预印本标识，需核对出版状态与版本差异。
 
 ```sh
 python3 /skills/weekly-skill/scripts/audit.py prepare --input /input --out /app/work/audit
 # 阅读 source-index.md 与原图，核对自动候选，填写 review-template.json 为 /app/work/reviewed.json
 python3 /skills/weekly-skill/scripts/audit.py render --evidence /app/work/audit/evidence.json --review /app/work/reviewed.json --out /app/output
+python3 /skills/weekly-skill/scripts/audit.py selfcheck --result /app/output/result.json --case /input/case.json --evidence /app/work/audit/evidence.json --out /app/work
 ```
+
+`selfcheck` 核验三件事：`result.json` 是否满足当前 `case.json` 的 `output_contract` 必填字段、每条 finding 的引文是否仍逐字存在于所引段落、六个 facet 是否都有覆盖记录；不通过时退出码为 1 并逐条列出原因。
 
 交付前做完整性自检：六个 facet 都要有 `checked`（带真实证据）或写明原因的 `not_checked` / `not_applicable` / `unable_to_determine`；每条 finding 的 quote 必须逐字出现在所引段落；`validation.json` 的 rejected 要逐条修正后再交。若案例材料只有摘要或缺正文，明确写缺哪一文件、哪一页，不能把未读内容标成 checked。
 
@@ -55,3 +62,4 @@ references/output-contract.md 说明接口；references/example-output.md 给出
 
 1.0.0 新建专项审查流程、双侧证据绑定、可读报告及异常回归。
 1.1.0 增加基于真实段落的引用候选预填（缺书目/缺编号），并在 SKILL 中固化六 facet 完整性与逐字引用自检，降低“输出不完整”的风险；不改变人工语义判定边界。
+1.2.0 增加数值一致性候选（显著性阈值、样本量冲突、互斥百分比超 100%）与来源状态候选（撤稿/勘误/预印本），新增 `selfcheck` 子命令按运行时 `output_contract`、逐字引文与六 facet 覆盖做交付前校验；所有自动候选仅作定位提示，语义判定仍由 Agent 完成。

@@ -104,6 +104,87 @@ def citation_candidates(records):
                           "quote": record["quote"], "sha256": record["sha256"]}]})
     return findings[:20]
 
+P_VALUE = re.compile(r"\bp\s*(?:值)?\s*[<≤=]\s*(0?\.\d+)", re.I)
+SAMPLE_SIZE = re.compile(r"(?:\bn\s*=\s*|\bN\s*=\s*|样本量\s*[:：=]?\s*)(\d+)")
+PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+SIGNIFICANCE = re.compile(r"显著|显著性|\bsignificant", re.I)
+RETRACTION = re.compile(r"\bretract(?:ed|ion)?\b|撤稿", re.I)
+CORRECTION = re.compile(r"\berratum\b|\bcorrigendum\b|更正声明|勘误", re.I)
+PREPRINT = re.compile(r"\bpreprint\b|\bmedrxiv\b|\bbiorxiv\b|\barxiv\b", re.I)
+
+
+def evidence_of(record):
+    return {"source_id": record["source_id"], "locator": record["locator"],
+            "quote": record["quote"], "sha256": record["sha256"]}
+
+
+def numeric_candidates(records):
+    """Deterministic numeric-consistency candidates; all require semantic confirmation."""
+    findings = []
+    # 1. A paragraph that calls a result significant while reporting p >= 0.05.
+    for record in records:
+        for match in P_VALUE.finditer(record["quote"]):
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if value >= 0.05 and SIGNIFICANCE.search(record["quote"]):
+                findings.append({
+                    "id": f"NUM-P-{len(findings) + 1}", "facet": "statistics",
+                    "judgment": "evidence_gap", "severity": "major",
+                    "basis": (f"自动定位候选（需语义确认）：该段自称显著，但同段给出的 p 值为 {match.group(1)}，"
+                              "未达到常用的 0.05 显著性阈值。"),
+                    "action": "核对原始统计输出；若确为 p≥0.05，改写为“未达显著”或补充其他检验依据。",
+                    "evidence": [evidence_of(record)]})
+    # 2. Conflicting sample sizes inside one source.
+    by_source = {}
+    for record in records:
+        for match in SAMPLE_SIZE.finditer(record["quote"]):
+            by_source.setdefault(record["source_id"], {}).setdefault(int(match.group(1)), record)
+    for source_id, values in by_source.items():
+        if len(values) > 1:
+            chosen = [values[k] for k in sorted(values)[:3]]
+            findings.append({
+                "id": f"NUM-N-{len(findings) + 1}", "facet": "statistics",
+                "judgment": "evidence_gap", "severity": "minor",
+                "basis": ("自动定位候选（需语义确认）：同一来源出现多个不同的样本量 "
+                          + "、".join(f"n={k}" for k in sorted(values)[:3]) + "，需确认是否指不同分析集。"),
+                "action": "在正文、图注和表格中统一样本量口径，或明确写出各分析集与缺失处理。",
+                "evidence": [evidence_of(r) for r in chosen]})
+    # 3. Percentages that exceed 100 in a single paragraph (multi-select artefacts excepted).
+    for record in records:
+        values = [float(v) for v in PERCENT.findall(record["quote"])]
+        if len(values) >= 2 and sum(values) > 100.5:
+            findings.append({
+                "id": f"NUM-PCT-{len(findings) + 1}", "facet": "statistics",
+                "judgment": "evidence_gap", "severity": "minor",
+                "basis": (f"自动定位候选（需语义确认）：同段百分比合计约 {sum(values):.1f}%，"
+                          "若为互斥分组则超过 100%。"),
+                "action": "确认百分比基数与是否多选；统一分母并在图注或表注说明。",
+                "evidence": [evidence_of(record)]})
+    return findings[:10]
+
+
+def source_meta_candidates(records):
+    """Flag retraction / correction / preprint markers for manual confirmation."""
+    findings = []
+    checks = (("RETRACT", RETRACTION, "major", "出现撤稿相关字样"),
+              ("CORR", CORRECTION, "minor", "出现勘误/更正相关字样"),
+              ("PREPRINT", PREPRINT, "informational", "出现预印本标识"))
+    for tag, pattern, severity, label in checks:
+        for record in records:
+            if not pattern.search(record["quote"]):
+                continue
+            findings.append({
+                "id": f"SOURCE-META-{tag}-{len(findings) + 1}", "facet": "facts",
+                "judgment": "evidence_gap", "severity": severity,
+                "basis": f"自动定位候选（需语义确认）：{label}，需核对出版状态、版本日期与影响范围。",
+                "action": "核对出版商/期刊的正式记录与发表版本；如已撤稿或更正，说明对结论的影响并替换引用。",
+                "evidence": [evidence_of(record)]})
+            break
+    return findings[:5]
+
+
 def prepare(source, out):
     case = json.loads((source / "case.json").read_text()) if (source / "case.json").exists() else {}
     if not isinstance(case, dict):
@@ -145,10 +226,11 @@ def prepare(source, out):
     (out / "source-index.md").write_text("\n".join(lines), encoding="utf-8")
     write(out / "review-template.json", {
         "case_id": evidence["case_id"], "summary": "",
-        "findings": citation_candidates(records),
+        "findings": (citation_candidates(records) + numeric_candidates(records)
+                     + source_meta_candidates(records))[:20],
         "checks": [{"facet": facet, "status": "not_checked", "evidence": [],
                     "reason": "Agent must read actual material" + (
-                        "; automatic citation candidates were pre-filled" if facet == "citation_support" else "")
+                        "; automatic candidates were pre-filled" if facet in {"citation_support", "statistics", "facts"} else "")
                     } for facet in FACETS]})
     report = {"case_id": evidence["case_id"], "status": "partial" if records else "failed",
               "stage": "evidence_prepared", "sources": files,
@@ -275,6 +357,55 @@ def render(evidence_path, review_path, out):
     return {"status": status, "accepted": len(accepted), "rejected": len(rejected),
             "validation_passed": not (errors or rejected or missing)}
 
+def selfcheck(result_path, case_path, evidence_path, out):
+    """Check a finished result.json against the runtime contract and the evidence index."""
+    result = json.loads(Path(result_path).read_text())
+    case = json.loads(Path(case_path).read_text()) if Path(case_path).exists() else {}
+    errors = []
+    if not isinstance(result, dict):
+        raise ValueError("result.json must be an object")
+    expected = case.get("case_id", case.get("id")) if isinstance(case, dict) else None
+    if expected is not None and result.get("case_id") != expected:
+        errors.append(f"case_id mismatch: {result.get('case_id')!r} != {expected!r}")
+    if result.get("status") not in {"success", "partial", "failed"}:
+        errors.append("status must be success/partial/failed")
+    contract = case.get("output_contract") if isinstance(case, dict) else None
+    required = []
+    if isinstance(contract, dict):
+        fields = contract.get("fields", contract.get("required", contract))
+        if isinstance(fields, dict):
+            required = [k for k in fields if k]
+        elif isinstance(fields, list):
+            required = [f if isinstance(f, str) else (f.get("id") or f.get("name"))
+                        for f in fields if isinstance(f, (str, dict))]
+    for name in required:
+        if name and name not in result:
+            errors.append("missing contract field: " + str(name))
+    index = {}
+    if evidence_path and Path(evidence_path).exists():
+        evidence = json.loads(Path(evidence_path).read_text())
+        index = {(p["source_id"], p["locator"]): p for p in evidence.get("paragraphs", [])}
+    findings = result.get("findings") or []
+    checks = result.get("checks") or []
+    if not isinstance(findings, list) or not isinstance(checks, list):
+        errors.append("findings and checks must be lists")
+        findings, checks = [], []
+    for finding in findings:
+        problems = check_evidence(finding.get("evidence"), index) if index else []
+        if problems and not index:
+            problems = []
+        if problems:
+            errors.append(f"finding {finding.get('id')}: " + "; ".join(problems))
+    covered = {c.get("facet") for c in checks if isinstance(c, dict)}
+    missing_facets = sorted(set(FACETS) - covered)
+    if missing_facets:
+        errors.append("missing facet coverage: " + ", ".join(missing_facets))
+    report = {"passed": not errors, "errors": errors, "missing_facets": missing_facets,
+              "findings": len(findings), "checks": len(checks)}
+    write(Path(out) / "selfcheck.json", report)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -285,8 +416,17 @@ def main():
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--review", type=Path, required=True)
     p.add_argument("--out", type=Path, default=Path("/app/output"))
+    p = sub.add_parser("selfcheck")
+    p.add_argument("--result", type=Path, required=True)
+    p.add_argument("--case", type=Path, default=Path("/input/case.json"))
+    p.add_argument("--evidence", type=Path, default=Path("/app/work/audit/evidence.json"))
+    p.add_argument("--out", type=Path, default=Path("/app/work"))
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.mode == "selfcheck":
+        report = selfcheck(args.result, args.case, args.evidence, args.out)
+        print(json.dumps(report, ensure_ascii=False))
+        return 0 if report["passed"] else 1
     case_id = None
     if args.mode == "render":
         try:
