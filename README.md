@@ -6,6 +6,8 @@ Each directory under `challenges/` contains one challenge's Skill package
 
 | Challenge ID |
 |---|
+| benchmark-a1d81ca4 |
+| benchmark-d57ad64a |
 | challenge-15c85674 |
 | challenge-1bd90d8a |
 | challenge-20870c35 |

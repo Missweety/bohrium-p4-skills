@@ -1,0 +1,19 @@
+{
+ "case_id": "SYN-WRITE-001",
+ "title": "SYNTHETIC writing benchmark case (interface demo, not an official case)",
+ "data_license": "synthetic-demo-by-skill-author",
+ "audience": "非专业政策读者",
+ "required_sections": ["Background", "Methods", "Results", "Limitations"],
+ "max_chars": 6000,
+ "materials": ["materials.md"],
+ "output_contract": [
+  "case_id",
+  "status",
+  "deliverable",
+  "fact_source_map",
+  "evaluation",
+  "sources",
+  "uncertainty",
+  "checks"
+ ]
+}

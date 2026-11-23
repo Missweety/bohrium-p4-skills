@@ -1,0 +1,23 @@
+{
+ "case_id": "SYN-READ-001",
+ "title": "SYNTHETIC reading benchmark case (interface demo, not an official case)",
+ "data_license": "synthetic-demo-by-skill-author",
+ "materials": ["materials.md"],
+ "workorder": [
+  {"id": "W01", "text": "Build one numeric item that requires a value with its unit and a source locator."},
+  {"id": "W02", "text": "Build one table item that resolves to a specific table row."},
+  {"id": "W03", "text": "Build one absence item whose correct answer states that the result is not reported."},
+  {"id": "W04", "text": "Build one condition item whose correct answer includes the limiting condition."}
+ ],
+ "output_contract": [
+  "case_id",
+  "status",
+  "benchmark",
+  "items",
+  "readings",
+  "sources",
+  "uncertainty",
+  "change_log",
+  "checks"
+ ]
+}
