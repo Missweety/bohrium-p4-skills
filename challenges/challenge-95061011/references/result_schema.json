@@ -1,0 +1,24 @@
+{
+  "_note": "result.json 的字段结构示例（结构示意，字段名以运行时 output_contract 为准）",
+  "case_id": "<取自 /input/case.json>",
+  "status": "success | partial | failed",
+  "sources": [
+    {
+      "file": "<材料文件名>",
+      "locator": "p.N/sec.X/sent.K",
+      "note": "<用途>"
+    }
+  ],
+  "uncertainty": {
+    "level": "high | medium | low",
+    "notes": [
+      "<未决事项或 none>"
+    ],
+    "unresolved": [
+      "<未能自动取值的字段名>"
+    ]
+  },
+  "change_log": [
+    "<本次运行实际做过的动作>"
+  ]
+}

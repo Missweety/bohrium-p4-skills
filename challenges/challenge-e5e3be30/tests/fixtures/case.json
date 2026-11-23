@@ -1,0 +1,18 @@
+{
+ "case_id": "synthetic-e5e3be30-smoke",
+ "task": "Synthetic smoke fixture: verify each claim against the two provided synthetic papers.",
+ "synthetic": true,
+ "output_contract": {
+  "case_id": "string",
+  "status": "enum: ok|partial|blocked|refused",
+  "claim_evidence": "path",
+  "verdicts": "list",
+  "source_map": "list",
+  "conflicts": "list",
+  "gaps": "list",
+  "summary": "string",
+  "metrics": "object",
+  "limits": "string",
+  "uncertainty": "list"
+ }
+}

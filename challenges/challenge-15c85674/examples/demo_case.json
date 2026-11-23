@@ -1,0 +1,19 @@
+{
+  "_note": "示例输入（合成）。真实案例由平台在评测时提供，参赛者不自带正式案例。",
+  "case_id": "example-case-id",
+  "paper_id": "example-paper-id",
+  "material_version": "v1",
+  "paragraphs": [
+    {
+      "paragraph_id": "p12",
+      "section": "示例章节",
+      "text": "示例段落原文，用于演示引用方式。"
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "q1",
+      "question": "示例问题：某项结果是什么？"
+    }
+  ]
+}

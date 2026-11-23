@@ -1,0 +1,60 @@
+{
+  "_note": "result.json 结构示例（字段名以运行时 output_contract 为准）",
+  "case_id": "<取自 /input/case.json>",
+  "paper_id": "<取自 /input/case.json>",
+  "material_version": "<取自 /input/case.json>",
+  "status": "success | partial | failed",
+  "answers": [
+    {
+      "question_id": "q1",
+      "answer": "<回答文本>",
+      "conditions": [
+        "<成立条件：数值/单位/比较对象/实验条件/结论范围>"
+      ],
+      "status": "answered | partial | insufficient_evidence | input_error",
+      "claims": [
+        {
+          "claim_id": "q1-c1",
+          "text": "<论断文本>",
+          "kind": "reported | inferred",
+          "evidence": [
+            {
+              "paragraph_id": "<真实段落编号>",
+              "quote": "<逐字短引文>"
+            }
+          ]
+        }
+      ],
+      "unanswered_parts": [
+        {
+          "part": "<未回答部分>",
+          "reason": "<原因>"
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "read_sections": [
+      "<已读章节>"
+    ],
+    "unread_sections": [],
+    "reasons": []
+  },
+  "sources": [
+    {
+      "file": "<材料>",
+      "locator": "paragraph_id=<编号>",
+      "note": "<用途>"
+    }
+  ],
+  "uncertainty": {
+    "level": "low | medium | high",
+    "notes": [
+      "<未决项或 none>"
+    ],
+    "unresolved": []
+  },
+  "change_log": [
+    "<本次运行实际做过的动作>"
+  ]
+}
