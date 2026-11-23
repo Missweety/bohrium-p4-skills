@@ -1,0 +1,2 @@
+# Runtime result
+The runtime case and output_contract are authoritative. The agent must read them, fill every original field using the requested type and actual values, validate artifact paths, retain original case_id, status and uncertainty, and distinguish missing sources from negative findings. The helper's review.json is a working format, not a substitute for case-specific contract mapping. Do not add fabricated defaults just to satisfy a schema.

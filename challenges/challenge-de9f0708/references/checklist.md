@@ -1,0 +1,3 @@
+# Adversarial review checklist
+
+For each applicable topic, record both supporting and contrary evidence and policy version. Check manuscript, supplement and administrative attachments before asserting omission. If a source is inaccessible, maintain unverified rather than infer misconduct. Redact direct identifiers in outputs. Compare licensing and approval scope against the actual use/population, not just the existence of a licence or approval. Citation metadata checks cannot establish that cited evidence supports the proposition. If supplied rules are absent or date/scope ambiguous, record the uncertainty and request the actual source. Result verification concerns literal source location, not the scientific or legal conclusion.
