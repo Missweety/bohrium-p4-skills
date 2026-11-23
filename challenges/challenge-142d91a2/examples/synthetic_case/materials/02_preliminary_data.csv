@@ -1,0 +1,7 @@
+participant_id,age,gait_speed_m_s,stride_time_cv,fall_history,follow_up_months
+S001,68,1.12,3.1,0,12
+S002,72,0.94,4.8,1,12
+S003,75,0.88,5.2,1,12
+S004,69,1.05,3.6,0,12
+S005,81,0.76,6.4,1,12
+S006,77,0.91,4.4,0,12

@@ -1,0 +1,25 @@
+{
+  "case_id": "synthetic-gait-001",
+  "title": "基于可穿戴步态监测的社区老年人跌倒风险预测：一项 18 个月前瞻性队列研究",
+  "audience": "开题评审专家组",
+  "discipline": "老年医学 / 康复工程",
+  "research_question": "连续步态指标能否独立于传统问卷预测社区老年人 12 个月内的跌倒，并在社区测量流程中保持可接受的一致性？",
+  "materials": [
+    "materials/01_project_guideline.md",
+    "materials/02_preliminary_data.csv",
+    "materials/03_group_notes.md"
+  ],
+  "output_contract": {
+    "proposal_md": "可编辑的 Markdown 开题报告正文，覆盖研究背景、问题定义、目标、技术路线、阶段计划、风险与预期成果",
+    "proposal_docx": "与 Markdown 同内容的可编辑 DOCX，保留标题层级与表格，可被 Word 重新打开",
+    "elements": "七要素的结构化结果与逐项状态",
+    "evidence_map": "事实性表述到材料锚点与逐字引文的映射",
+    "constraints": "周期、经费、样本、人员、数据、伦理条件的结构化提取",
+    "feasibility": "数据、样本、方法、设备、时间、经费、伦理等逐项可行性判断",
+    "risks": "数据、方法、进度、伦理四类风险及触发信号、影响、备选方案与决策时点",
+    "milestones": "按周期分配的阶段、起止月、交付物、依赖与关键路径",
+    "uncertainty": "缺失信息、冲突与需人工确认事项",
+    "change_log": "本次生成做了什么、哪些内容属于草拟",
+    "status": "success | partial | failed 的诚实状态"
+  }
+}
