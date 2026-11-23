@@ -1,0 +1,9 @@
+{
+ "case_id": "synthetic-format-demo",
+ "synthetic": true,
+ "output_contract": [
+  "case_id", "status", "docx_path", "format_report", "page_count",
+  "sources", "uncertainty", "change_log", "issues", "deliverables",
+  "contract_fields", "spec_summary"
+ ]
+}
