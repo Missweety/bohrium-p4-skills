@@ -1,0 +1,29 @@
+{
+  "_note": "SYNTHETIC：模拟运行时 organizer-edit-workorder.json。每条均为可机械落地的定点指令。",
+  "edits": [
+    {
+      "target_quote": "显著提升",
+      "replacement": "有明显提升",
+      "basis": "避免无数据支撑的绝对化断言，改为可核验的表述"
+    },
+    {
+      "target_quote": "现有工具往往直接覆盖整段",
+      "replacement": "部分现有工具倾向于覆盖整段",
+      "basis": "限定范围，避免以偏概全"
+    }
+  ],
+  "delete_sentences": [
+    {
+      "quote": "本节数据尚未公开，仅作示例。",
+      "basis": "与可复现的交付要求冲突，删除"
+    }
+  ],
+  "insertions": [
+    {
+      "anchor": "把修改指令落到具体句子",
+      "text": "与段落",
+      "basis": "补齐指令落点范围"
+    }
+  ],
+  "citation_sync": true
+}

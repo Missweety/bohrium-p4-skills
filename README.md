@@ -12,6 +12,8 @@ Each directory under `challenges/` contains one challenge's Skill package
 | challenge-15c85674 |
 | challenge-1bd90d8a |
 | challenge-20870c35 |
+| challenge-32c0210d |
+| challenge-7b09c079 |
 | challenge-7c37626c |
 | challenge-83d4f050 |
 | challenge-9034312d |

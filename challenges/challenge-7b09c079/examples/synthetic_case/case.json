@@ -1,0 +1,19 @@
+{
+  "case_id": "synthetic-7b09c079",
+  "_note": "SYNTHETIC：本 Skill 自造的演示用例，不是平台正式案例，也不是真实论文。",
+  "manuscript": ["manuscript.md"],
+  "output_contract": {
+    "required": [
+      "manuscript",
+      "revisions",
+      "evidence",
+      "coverage",
+      "status",
+      "sources",
+      "uncertainty",
+      "change_log",
+      "citation_map",
+      "version_history"
+    ]
+  }
+}
