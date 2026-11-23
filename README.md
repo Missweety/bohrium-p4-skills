@@ -28,6 +28,7 @@ Each directory under `challenges/` contains one challenge's Skill package
 | challenge-f35e4ca5 |
 | challenge-073af7d3 |
 | graphical-abstract-7030fff2 |
+| product-arena-06-6d8cf72b |
 | ppt-6ad93034 |
 | ppt-710fbc72 |
 | ppt-c7b80f0d |
