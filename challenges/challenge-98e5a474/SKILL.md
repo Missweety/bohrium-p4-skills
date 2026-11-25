@@ -2,7 +2,7 @@
 name: source-bound-scientific-schematic
 description: Generate or edit a scientific schematic from the actual supplied papers, biological sources, data and original SVG; retain editable layers, trace every important visual element, and export the actual SVG to inspected PNG/PDF.
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
 license: MIT
 ---
 
@@ -33,6 +33,16 @@ python scripts/deliver.py --case /input/case.json --plan /app/work/plan.json --o
 ```
 
 Read [references/plan-and-example.md](references/plan-and-example.md) for the plan schema and a **synthetic** minimal invocation. The script requires actual element locators supplied by the agent; it does not extract or invent scientific relations. It supports `create` primitives, `edit` by unique ID or exact leaf text, and `copy` of an agent-authored complete SVG. It always writes real source SVG, evidence map, changes, caption, export checks and structured result. Rename/copy files and update their references if the case demands different names. Add all task-specific output fields in `result_fields`; see [references/output-contract.md](references/output-contract.md).
+
+## Budget guard: run the autopilot baseline first
+
+When the case budget is tight, or before an authored plan exists, run:
+
+```bash
+python scripts/autopilot.py --case /input/case.json --out /app/output
+```
+
+It extracts labels and arrow relations from the case text, bullet lists and CSV headers by rule, builds a traced plan, then calls the same deliverer, so the case always leaves a real editable SVG, evidence map and `result.json`. Every label and arrow carries a material line locator, status is `partial`, and uncertainty records that entity identity, grouping and direction need `human_confirm`. It refuses to guess source-figure edits or data charts and never invents values or measurements; those cases return `status: blocked` with the reason instead of a fake figure. Treat the result as a floor: check the drawn entities and directions against the sources and refine with an authored `--plan` when budget allows. An authored plan always takes precedence.
 
 Exports render the **actual SVG**, using CairoSVG, rsvg-convert or Inkscape. Python 3.10+ is required; the geometry/editing helper itself uses standard library. CairoSVG can be installed with `python -m pip install CairoSVG` (tested 2.9.1; requires native Cairo); alternatively use installed rsvg-convert or Inkscape. Do not spend the full case budget on installation: try an available real renderer, then retain source and return a precise partial result if none works. There is no fake preview, text-free substitute or redraw-from-spec fallback. The helper writes the requested dpi into PNG `pHYs` metadata and reads it back as `density_dpi`; pixel dimensions still follow canvas × scale, so set `scale` when the task specifies a physical print size rather than pixels. A missing renderer leaves PNG/PDF reported as missing, never as verified.
 
