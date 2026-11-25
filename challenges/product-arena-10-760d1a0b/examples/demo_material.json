@@ -1,0 +1,24 @@
+{
+ "paragraphs": [
+  {
+   "doi": "10.0000/demo.001",
+   "paragraph_id": "p1",
+   "text": "The Langmuir model was fitted to the adsorption of caffeine on coffee biochar at pH 6 and 22 C."
+  },
+  {
+   "doi": "10.0000/demo.001",
+   "paragraph_id": "p2",
+   "text": "The maximum adsorption capacity was 88 mg/g in this demo dataset."
+  },
+  {
+   "doi": "10.0000/demo.002",
+   "paragraph_id": "p1",
+   "text": "A Langmuir model was compared with a Freundlich model for caffeine uptake on rice-husk biochar at pH 4."
+  },
+  {
+   "doi": "10.0000/demo.002",
+   "paragraph_id": "p2",
+   "text": "The maximum adsorption capacity was 132 mg/g for the rice-husk biochar."
+  }
+ ]
+}

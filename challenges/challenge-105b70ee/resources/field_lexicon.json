@@ -1,0 +1,16 @@
+{
+  "_note": "人工映射提示：仅帮助把业务字段名换成检索词，不会把这里的值写进结果。",
+  "field_hint_groups": {
+    "sample_size": ["number of participants", "n =", "enrolled", "cohort", "样本量", "纳入"],
+    "dose": ["dose", "mg", "administered", "daily", "剂量", "给药"],
+    "outcome_mean": ["mean", "reduction", "change", "improvement", "均值", "下降"],
+    "uncertainty": ["95% CI", "confidence interval", "IQR", "±", "置信区间"],
+    "comparator": ["compared with", "versus", "placebo", "control group", "对照"],
+    "condition": ["at", "under", "during", "follow-up", "条件", "随访"],
+    "conclusion": ["conclude", "we find", "authors report", "结论", "作者认为"],
+    "adverse": ["adverse event", "safety", "toxicity", "不良事件", "安全性"]
+  },
+  "unit_whitelist": ["mg", "g", "kg", "ml", "l", "mmol", "mol", "nm", "cm", "mm", "min",
+                     "h", "day", "week", "month", "year", "%", "mg/g", "mmol/L", "mg/L"],
+  "status_vocabulary": ["reported", "not_reported", "source_conflict", "extraction_failed"]
+}

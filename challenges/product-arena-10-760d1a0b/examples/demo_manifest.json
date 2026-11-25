@@ -1,0 +1,20 @@
+{
+ "papers": [
+  {
+   "source_id": "DEMO-P1",
+   "doi": "10.0000/demo.001",
+   "title": "Demo study one",
+   "authors": ["Demo Author A"],
+   "license": "CC0-1.0",
+   "file": "demo_material.json"
+  },
+  {
+   "source_id": "DEMO-P2",
+   "doi": "10.0000/demo.002",
+   "title": "Demo study two",
+   "authors": ["Demo Author B"],
+   "license": "CC0-1.0",
+   "file": "demo_material.json"
+  }
+ ]
+}

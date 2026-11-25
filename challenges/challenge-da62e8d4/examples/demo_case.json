@@ -1,0 +1,9 @@
+{
+  "case_id": "demo-reproduction-audit",
+  "synthetic": true,
+  "task": "演示用合成案例：重建复现计划并复算 t/df→p 与百分比变化。",
+  "output_contract": {
+    "required": ["case_id", "status", "answer", "reproduction", "plan", "evidence",
+                 "sources", "uncertainty", "limits", "change_log"]
+  }
+}

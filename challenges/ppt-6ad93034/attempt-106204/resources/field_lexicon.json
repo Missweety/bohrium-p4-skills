@@ -1,0 +1,90 @@
+{
+  "challenge_id": "ppt-6ad93034",
+  "title": "学术 PPT 生成与编辑",
+  "lane": "slides",
+  "domain_keywords": [
+    "学术PPT生成",
+    "页面骨架",
+    "内容取舍",
+    "页序规划",
+    "换受众改写",
+    "换语言改写",
+    "图表插入",
+    "图表重绘",
+    "讲稿备注",
+    "多轮迭代",
+    "逐页diff",
+    "版本回退",
+    "模板槽位",
+    "页脚规范",
+    "导出渲染"
+  ],
+  "status_vocabulary": {
+    "run_level": [
+      "success",
+      "partial",
+      "failed",
+      "refused"
+    ],
+    "field_level": [
+      "rendered",
+      "partial",
+      "not_rendered",
+      "extraction_failed"
+    ],
+    "topic_specific": [
+      "completed",
+      "partial（部分完成，须列名待修页）",
+      "source_missing（论文缺图、图片为位图无法取数）",
+      "undetermined（模板与内容冲突、图表编号错位）",
+      "run_failed（模板槽位不足、字体缺失、页数超限、导出失败）",
+      "not_verified"
+    ]
+  },
+  "anchor_spec": {
+    "p.N": "第 N 页（1-based，PDF 物理页序，不是印刷页码）",
+    "sec.X": "第 X 个章节单元",
+    "sent.K": "该章节单元第 K 句",
+    "tab.M": "第 M 张表",
+    "row.K": "该表第 K 行",
+    "cap.M": "第 M 条图注/表注",
+    "para.K": "第 K 个段落（当输入直接提供段落编号时）"
+  },
+  "input_files": [
+    "/input/case.json —— case_id、论文输入、目标模板、固定受众、时长与页数上限、任务要求",
+    "/input/task.md —— 题面原文",
+    "论文正文、结果段落或提纲本体 PDF（真 PDF，无预抽取答案层）与其中的图表、数据表",
+    "组织方给定的母版/版式可编辑模板（actual master/layout-based editable template，含母版、版式、占位符、字号层级、配色、页脚规范）",
+    "需要编辑或改编的案例附带的起始演示稿（actual starting deck）",
+    "case.json 中固定的受众、讲述时长与幻灯片张数（fixed audience / time / slide count）",
+    "/app/work 工作区与 /app/output 交付区（含 result.json）",
+    "environment/resources.yaml —— office-renderer、pdf-text-tool、pdf-render-tool、ocr-tool、scientific-python、font-discovery"
+  ],
+  "must_do": [
+    "完成内容取舍与页序规划，明确每页承担的叙事角色（背景/方法/结果/结论），不按论文目录逐节搬运",
+    "支持按指令压缩、扩写、换受众（导师/评审/同行）、换语言地改写页面内容，并保持术语、符号与论文一致",
+    "插入图表：还原论文图表或数据表，处理图注、编号、单位与引用，并明确区分可重绘图表与只能引用原图的图表",
+    "关键数字逐字回抄并核对，保留原有精度，不按印象取整；图注与图上标注一致",
+    "多轮修改保持版本可比对：记录每轮改了什么、为什么改、改坏后如何回退；改一页不得改坏母版与后续页",
+    "在模板字体、配色、页脚规范内成稿，处理槽位不足、长标题、多图并排与页数超限",
+    "导出 PDF 与逐页 PNG 校验字体未替换、图片未裁、版式未塌，并输出逐页 diff",
+    "result.json 写齐页结构与叙事角色、页级证据映射、渲染与版本记录"
+  ],
+  "hard_rules": [
+    "不得整段贴论文摘要或 Results 塞满页面；不得放占位图或凭空生成的曲线当实验数据",
+    "不得改坏母版与后续页；批量改动必须可回退并留版本记录",
+    "不得覆盖模板字体、配色、页脚风格",
+    "必须交付可打开可编辑的 pptx，而不只是 PDF 或图片",
+    "不得编造运行结果、benchmark 分数或未执行的导出动作"
+  ],
+  "evidence_granularity": "页级 + 元素级 + 轮次级：每页主张与数字回指论文位置；每轮迭代给出改动清单（页码、字段、原因）与可回退点；插入图表标注数据来源。",
+  "verifiable_metrics": [
+    "叙事角色覆盖率 = 明确标注角色的页数 / 总页数，目标 100%",
+    "图表一致率 = 与论文数据一致的插入图表数 / 插入图表总数，目标 100%",
+    "迭代可回退率 = 有可用回退点的轮次数 / 总轮次数 = 100%",
+    "越界改动条数 = 0（未改母版、主题与其他页面的改动数）",
+    "溢出或塌版页数 = 0 且导出后字体被替换页数 = 0",
+    "超出固定页数上限的页数 = 0"
+  ],
+  "distinctive_capability": "提供可多轮迭代、可回退的页面级编辑链路：每轮改动有 diff 与回退点，且每张图表可判定「可重绘还是只能引用」，避免改一页坏全稿。"
+}

@@ -1,0 +1,9 @@
+{
+ "case_id": "demo-knowledge-graph",
+ "task": "示例（合成数据，非正式案例）：两篇短文构建知识图谱并执行 4 条查询。",
+ "synthetic": true,
+ "output_contract": {
+  "required": ["case_id", "status", "answer", "graph", "queries", "alias_decisions",
+               "integrity", "evidence", "sources", "uncertainty", "limits", "change_log"]
+ }
+}

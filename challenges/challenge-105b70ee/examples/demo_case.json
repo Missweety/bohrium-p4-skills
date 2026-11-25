@@ -1,0 +1,16 @@
+{
+  "case_id": "demo-field-extraction",
+  "synthetic": true,
+  "task": "演示用合成案例：按 target-fields 抽取数值、区间、条件与结论。",
+  "output_contract": {
+    "required": ["case_id", "status", "answer", "fields", "evidence", "sources",
+                 "uncertainty", "limits", "change_log"]
+  },
+  "target_fields": [
+    {"field_id": "sample_size", "description": "number of participants", "type": "number"},
+    {"field_id": "mean_reduction", "description": "mean LDL reduction", "unit": "mmol/L"},
+    {"field_id": "ci_95", "description": "95% confidence interval of the reduction"},
+    {"field_id": "comparator", "description": "comparison group"},
+    {"field_id": "author_conclusion", "description": "authors' conclusion"}
+  ]
+}
