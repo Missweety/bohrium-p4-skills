@@ -6,7 +6,7 @@
 
 | 路径 | 内容 | 自检判据 |
 |---|---|---|
-| `result.json` | 案例级契约结果 | JSON 可解析；`case_id` 与输入一致；`status ∈ {success, partial, failed}`；`contract_fields` 非空 |
+| `result.json` | 案例级契约结果 | JSON 可解析；`case_id` 与输入一致；`status ∈ {success, partial, failed}`；声明了 `output_contract` 时字段须在顶层齐全 |
 | `report.json` | 汇总报告 | 含 `conditions`、`split`、`coverage`、`leakage`、`failure_examples`、`comparison` |
 | `scores/<agent>.json` | 逐题评分记录 | 每条含 `item_id`、`score ∈ {0,1,2}`、`rationale`、`failure_type` |
 | `runs/<agent>/answers.json` | 原始答案 | 与题目 ID 一一对应；可被重新评分 |
@@ -33,16 +33,19 @@
 | `change_log` | array | 本次建题/切分/评分口径的变更记录 |
 | `checks` | object | 五项布尔检查 |
 | `contract_fields` | object | 输入 `output_contract` 声明的字段逐个映射；无法映射的写 `null` 并列入 `uncertainty` |
+| （运行时字段） | 任意 | `output_contract` 声明的字段同时写到 `result.json` **顶层**；无原生映射的字段置 `null` 并记 `uncertainty.unmapped_contract_fields` |
 
 ## 3. `output_contract` 兼容规则
 
-- `output_contract` 可能是对象（字段名→说明）、字符串数组或对象数组（含 `name`/`field`/`id`）。
+- `output_contract` 可能是：字段名→说明的对象、`{"fields": {...}}` / `{"required": [...]}` 的容器、字符串数组或对象数组（含 `name`/`field`/`id`）。
 - 字段名优先取 `result.json` 顶层同名键；别名 `main_result`/`result`/`answers` 映射到 `{items, readings}`；`evidence`/`citations` 映射到 `sources`；`version` 映射到版本信息。
+- 声明的字段必须能在 `result.json` 顶层找到（`selfcheck.py` 的 `contract_fields_top_level` 检查），不只是嵌套在 `contract_fields` 里。
 - **不得伪造**：无对应实现的字段一律 `null` 并记入 `uncertainty`，不得填示意数据。
 
 ## 4. 评分记录硬约束
 
 - `score` 只能是 `0`、`1`、`2`；`gradable=false` 的记录不得计入汇总。
+- 切分以 `unit_id` 为最小单位：同一单元的全部题目整体落在 dev 或 test 一侧，不丢题、不跨侧；`split.json` 的 `shared_units`/`shared_quote_hashes` 必须为空。
 - 每条记录必须有非空 `rationale`；失败必须有 `failure_type`（`wrong_value`、`wrong_content`、`missing_or_wrong_anchor`、`empty_answer`、`answer_too_long`、`format_invalid`、`question_echo`、`refusal_mismatch`、`gold_missing` 等）。
 - 记录中的 `source_path` / `evidence_unit` 必须能在 `dataset.json` 中找到。
 

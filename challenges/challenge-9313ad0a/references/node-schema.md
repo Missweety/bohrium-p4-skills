@@ -43,9 +43,11 @@
 
 ## 自检规则
 
-1. 节点 id 唯一，`parent` 必须存在，除根外全部可达。
-2. 层级 3–5 层，单层同类不超过 9 个。
-3. `fact` / `summary` 节点的引文必须能在 `sources.json` 对应锚点文本中找到（忽略空白与全半角差异后子串匹配）。
-4. `inference` 必须有 `basis`，否则标为 `unverified`。
-5. 关系两端存在；`causes` / `precedes` / `depends_on` 不允许成环。
-6. 同一 `label` 不得重复；同义写进 `aliases`。
+1. 节点 id 唯一，`parent` 必须存在，除根外全部可达（违反 → error）。
+2. 层级建议 3–5 层（超过 5 层 warn，超过 6 层仍 warn）；单层同类超过 9 个 warn。
+3. `fact` / `summary` 节点的引文必须能在 `sources.json` 对应锚点文本中找到（忽略空白与全半角差异后子串匹配），找不到 → error 且节点标 `unverified`。
+4. `inference` 必须有 `basis`，否则 error；该类节点不计入核验率。
+5. 关系两端存在；`causes` / `precedes` / `depends_on` 不允许成环（成环 → error）。
+6. 同一 `label` 重复产生 `duplicate_label` warn（提示合并或改 `aliases`），不影响 `status`。
+7. `plan.nodes` 缺少根节点时脚本按 `plan.root`/`title` 补一个 `confidence=inference` 的根节点，写入 `change_log`，并计入 `node_count`（与 `mindmap.mm` 保持一致）。
+8. 节点数 ≥8、关系数 ≥5 只是建议阈值（warn）；材料短时如实少建，不得凑数。

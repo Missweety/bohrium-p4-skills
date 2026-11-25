@@ -1,46 +1,22 @@
 #!/usr/bin/env python3
-"""kernel.py - evidence-first execution kernel for the academic-writing skill.
+"""kernel.py - evidence-first execution kernel shared by all Bohrium skills.
 
-Subcommands (stdlib only, no network):
-  init     read case.json, emit contract.json + section_template.json + case.raw.json
-  index    discover materials, extract text, emit evidence.json / corpus.txt / facts.json
-  build    render work/manuscript.md + source_map.json + todo.md from work/draft.json
-  verify   check numbers and citations in a draft against the indexed materials
-  emit     merge draft + contract into result.json and copy the editable artifacts
-  check    strict delivery gate over an output directory
+Subcommands (all stdlib only, no network):
+  init     read /input/case.json (alias tolerant), emit work/contract.json + work/case.json
+  index    walk material dir, extract text with locators, emit work/evidence.json
+  build    render work/manuscript.md from a draft JSON (sections/figures/refs)
+  verify   check a draft against the evidence index (numbers, units, citations)
+  emit     merge draft fields + contract into result.json, write md artifacts, run selfcheck
+  check    validate an existing output dir against its contract
 
-Design rule: never fabricate. Missing data is written as an explicit placeholder plus
-an uncertainty record; it is never filled in from memory or from a topic label.
+Design rule: never fabricate. Missing data is reported as missing, never filled in.
 """
 import argparse
-import csv
-import hashlib
 import json
 import os
 import re
 import sys
 import zipfile
-
-DEFAULT_CONTRACT = {
-    "artifact_path": "manuscript.md",
-    "artifact_format": "md",
-    "source_map": [],
-    "changes": [],
-    "uncertainty": [],
-    "limits": "",
-    "self_check": {},
-    "conflicts": [],
-    "todo": [],
-    "references": [],
-    "figures": [],
-    "tables": [],
-}
-REQUIRED_RESULT_FIELDS = (
-    "case_id", "status", "artifact_path", "source_map", "changes",
-    "uncertainty", "limits", "self_check",
-)
-STATUSES = {"ok", "success", "partial", "blocked", "refused"}
-UNREADABLE_PREFIX = "[unreadable:"
 
 ALIASES = {
     "source_text": ["source_text", "text", "input_text", "manuscript", "content", "document", "paper_text"],
@@ -54,37 +30,18 @@ ALIASES = {
 }
 
 TEXT_EXT = {".txt", ".md", ".csv", ".tsv", ".json", ".tex", ".bib", ".yaml", ".yml", ".rst", ".html", ".xml"}
-SKIP_DIRS = {"work", "output", "__pycache__", ".git", "node_modules", ".trae"}
-SKIP_FILES = {"case.json", "task.md", "SKILL.md", "GITHUB_URL.txt"}
-
-NUM_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:[.,]\d+)*(?:\s?[%‰])?")
-UNIT_RE = re.compile(r"^\s*(%|‰|mg|kg|μg|µg|g|mL|ml|L|μM|µM|mM|nM|nm|mm|cm|km|m|ms|s|min|h|d|"
-                     r"°C|K|Pa|kPa|MPa|M|mol|mmol|μmol|µmol|bp|kb|Da|kDa|rpm|Hz|kHz|MHz|V|mA|W)\b")
-CITE_RE = re.compile(
-    r"(\[[0-9][0-9,\s\-–]*\]|\\cite\{[^}]+\}"
-    r"|\([A-Z][A-Za-z\-]+(?:\s(?:et al\.|and\s[A-Z][A-Za-z\-]+))?,?\s?(?:19|20)\d{2}[a-z]?\))"
-)
-STRUCT_RE = re.compile(
-    r"(?:Figure|Fig\.|Table|图|表|Eq\.?|公式|§|#)\s*([0-9]+(?:[.\-][0-9]+)*)", re.I)
-PLACEHOLDER_RE = re.compile(r"(?:【待补[:：]\s*([^】]*)】|\[TBD[:：]\s*([^\]]*)\])", re.I)
-
-SECTION_ALIASES = [
-    ("Abstract", ["abstract", "摘要"]),
-    ("Introduction", ["introduction", "引言", "绪论", "前言"]),
-    ("Methods", ["methods", "method", "materials and methods", "材料与方法", "方法", "实验方法"]),
-    ("Results", ["results", "结果"]),
-    ("Discussion", ["discussion", "讨论"]),
-    ("Conclusion", ["conclusion", "conclusions", "结论", "总结"]),
-    ("References", ["references", "bibliography", "参考文献"]),
-    ("Data availability", ["data availability", "数据可得性", "数据可用性"]),
-    ("Funding", ["funding", "基金", "资助"]),
-    ("Conflict of interest", ["conflict of interest", "competing interests", "利益冲突"]),
-    ("Ethics statement", ["ethics", "伦理"]),
-]
-SECTION_MIN_WORDS = {
-    "Abstract": 80, "Introduction": 120, "Methods": 120, "Results": 120,
-    "Discussion": 120, "Conclusion": 40, "References": 0,
-}
+NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?:\s?[%‰])?")
+CITE_RE = re.compile(r"(\[[0-9,\s\-–]+\]|\\cite\{[^}]+\}|\([A-Z][A-Za-z\-]+(?:\s(?:et al\.|and\s[A-Z][A-Za-z\-]+))?,?\s?(?:19|20)\d{2}[a-z]?\))")
+UNREADABLE_PREFIX = "[unreadable:"
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"}
+REF_HEADINGS = {"references", "reference", "bibliography", "works cited", "参考文献"}
+CONTRACT_META_KEYS = {"fields", "required", "type", "description", "schema", "properties", "title"}
+MANUSCRIPT_ALIASES = {"manuscript", "paper", "article", "draft", "document", "text", "content",
+                      "manuscript_md", "full_text", "paper_text", "report", "essay",
+                      "summary", "writeup", "output_text"}
+MAP_ALIASES = {"source_map", "sources_map", "evidence_map", "fact_map", "facts"}
+AUDIT_ALIASES = {"audit", "audit_report", "self_check"}
+STATUSES = {"ok", "success", "partial", "blocked", "refused"}
 
 
 def load_json(path):
@@ -112,6 +69,20 @@ def find_case_file(explicit=None):
         if c and os.path.exists(c):
             return c
     return None
+
+
+def contract_field_names(contract):
+    """Accept list form, {fields:[...]}, {required:[...]}, {properties:{...}} or dict-of-fields."""
+    if isinstance(contract, list):
+        return [str(x) for x in contract]
+    if isinstance(contract, dict):
+        for key in ("fields", "required"):
+            if isinstance(contract.get(key), list):
+                return [str(x) for x in contract[key]]
+        if isinstance(contract.get("properties"), dict):
+            return [str(x) for x in contract["properties"]]
+        return [str(k) for k in contract if k not in CONTRACT_META_KEYS]
+    return []
 
 
 # ---------------------------------------------------------------- extraction
@@ -170,551 +141,216 @@ def read_pdf(path):
         pass
     try:
         from pypdf import PdfReader  # type: ignore
-        text = "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
-        if text.strip():
-            return text
+        return "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
     except Exception:  # noqa: BLE001
-        pass
-    return "%s pdf has no readable text layer; render pages and mark quoted content as unverified]" % UNREADABLE_PREFIX
+        return "%s pdf text layer unavailable: install pdftotext or pypdf; do not guess page content]" \
+            % UNREADABLE_PREFIX
 
 
 def extract(path):
-    """Return extracted text. Only a leading [unreadable: marker marks failure."""
     ext = os.path.splitext(path)[1].lower()
-    try:
-        if ext == ".docx":
-            return read_docx(path)
-        if ext in {".xlsx", ".xlsm"}:
-            return read_xlsx(path)
-        if ext == ".pdf":
-            return read_pdf(path)
-        if ext in TEXT_EXT:
-            return open(path, encoding="utf-8", errors="replace").read()
-        if ext in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"}:
-            return "[asset: image file; inspect visually and record dimensions/content; text not extracted]"
-        return "%s unsupported type %s; do not guess its content]" % (UNREADABLE_PREFIX, ext)
-    except Exception as exc:  # noqa: BLE001
-        return "%s %s: %s]" % (UNREADABLE_PREFIX, ext, exc)
+    if ext == ".docx":
+        return read_docx(path)
+    if ext in {".xlsx", ".xlsm"}:
+        return read_xlsx(path)
+    if ext == ".pdf":
+        return read_pdf(path)
+    if ext in TEXT_EXT:
+        return open(path, encoding="utf-8", errors="replace").read()
+    if ext in IMAGE_EXT:
+        return "[image asset: inspect visually; record size/content in evidence notes]"
+    return "[unsupported type %s]" % ext
 
 
-def locate(snippet, corpus, source):
-    idx = corpus.find(snippet[:80])
-    if idx < 0:
-        return None
-    line = corpus.count("\n", 0, idx) + 1
-    return {"source": source, "line": line, "offset": idx}
-
-
-# ---------------------------------------------------------------- discovery
-def _resolve_materials(case, case_path):
-    base = os.path.dirname(os.path.abspath(case_path))
-    roots = []
-    declared = pick(case, "materials")
-    if isinstance(declared, str):
-        declared = [declared]
-    if isinstance(declared, list):
-        for item in declared:
-            if isinstance(item, dict):
-                item = item.get("path") or item.get("name")
-            if not isinstance(item, str):
-                continue
-            p = item if os.path.isabs(item) else os.path.join(base, item)
-            if os.path.exists(p):
-                roots.append(p)
-    for name in ("materials", "input", "data", "attachments", "supplementary"):
-        p = os.path.join(base, name)
-        if os.path.isdir(p):
-            roots.append(p)
-    if not roots and os.path.isdir(base):
-        roots = [base]
-    seen, out = set(), []
-    for r in roots:
-        r = os.path.abspath(r)
-        if r not in seen:
-            seen.add(r)
-            out.append(r)
-    return out
-
-
-def _walk_files(roots):
-    seen = set()
-    for root in roots:
-        if os.path.isfile(root):
-            yield root
-            continue
-        for dirpath, dirnames, names in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-            for n in sorted(names):
-                if n.startswith(".") or n in SKIP_FILES:
-                    continue
-                p = os.path.join(dirpath, n)
-                if p in seen or not os.path.isfile(p):
-                    continue
-                seen.add(p)
-                yield p
-
-
-def _safe_name(name):
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(str(name)))[:80] or "material.txt"
-
-
-def materialize_inline(case, workdir):
-    """Runtime inputs are sometimes embedded in case.json rather than mounted as files."""
-    outs = []
-    inline = pick(case, "source_text")
-    if isinstance(inline, str) and inline.strip():
-        p = os.path.join(workdir, "inline", "source_text.md")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as fh:
-            fh.write(inline)
-        outs.append(p)
-    declared = case.get("materials")
-    if isinstance(declared, list):
-        for i, item in enumerate(declared, start=1):
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content") or item.get("text")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            p = os.path.join(workdir, "inline", _safe_name(item.get("name") or "material_%d.txt" % i))
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            outs.append(p)
-    return outs
-
-
-# ---------------------------------------------------------------- fact candidates
-def _unit_of(token):
-    m = re.match(r"^\s*[-+]?\d+(?:[.,]\d+)*\s*(%|‰|[A-Za-zμµ°]+)?", token)
-    return (m.group(1) or "") if m else ""
-
-
-def _csv_facts(path, text):
-    ext = os.path.splitext(path)[1].lower()
-    delim = "," if ext == ".csv" else "\t"
-    try:
-        rows = list(csv.reader(text.splitlines(), delimiter=delim))
-    except Exception:  # noqa: BLE001
-        return []
-    if len(rows) < 2:
-        return []
-    header = [h.strip() for h in rows[0]]
-    facts = []
-    for r_i, row in enumerate(rows[1:], start=2):
-        for c_i, cell in enumerate(row):
-            cell = cell.strip()
-            if not cell or not NUM_RE.search(cell):
-                continue
-            value = NUM_RE.search(cell).group(0).strip()
-            col = header[c_i] if c_i < len(header) else "col%d" % (c_i + 1)
-            facts.append({
-                "value": value,
-                "unit": _unit_of(value),
-                "source_path": path,
-                "locator": "row %d, col %s" % (r_i, col),
-                "context": " | ".join("%s=%s" % (header[i], row[i]) for i in range(min(len(header), len(row))) if row[i].strip())[:200],
-            })
-    return facts
-
-
-def _line_facts(path, text):
-    facts = []
-    for i, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        toks = NUM_RE.findall(stripped)
-        if not toks:
-            continue
-        for tok in dict.fromkeys(toks):
-            facts.append({
-                "value": tok,
-                "unit": _unit_of(tok),
-                "source_path": path,
-                "locator": "line %d" % i,
-                "context": stripped[:200],
-            })
-    return facts
-
-
-def build_facts(path, text, cap=4000):
-    ext = os.path.splitext(path)[1].lower()
-    if ext in {".csv", ".tsv", ".xlsx"}:
-        facts = _csv_facts(path, text)
-        if facts:
-            return facts
-    return _line_facts(path, text)
-
-
-# ---------------------------------------------------------------- bib parsing
-def parse_bib(text):
-    refs = []
-    for block in re.split(r"(?=@\w+\s*\{)", text):
-        m = re.match(r"@\w+\s*\{\s*([^,\s]+)\s*,", block)
-        if not m:
-            continue
-        key = m.group(1)
-        fields = {k.lower(): v.strip() for k, v in re.findall(r"(\w+)\s*=\s*[\{\"]([^\}\"]*)[\}\"]", block)}
-        refs.append({
-            "key": key,
-            "authors": fields.get("author", ""),
-            "year": fields.get("year", ""),
-            "title": fields.get("title", ""),
-            "venue": fields.get("journal") or fields.get("booktitle") or "",
-            "doi": fields.get("doi", ""),
-            "source_path": "",
-            "locator": "@%s" % key,
-        })
-    return refs
-
-
-# ---------------------------------------------------------------- section template
-def detect_template(task_text, genre, language):
-    text = (task_text or "").lower()
-    found = []
-    for name, aliases in SECTION_ALIASES:
-        if any(a.lower() in text for a in aliases):
-            found.append(name)
-    if language and str(language).lower().startswith("zh"):
-        names = {
-            "Abstract": "摘要", "Introduction": "引言", "Methods": "方法", "Results": "结果",
-            "Discussion": "讨论", "Conclusion": "结论", "References": "参考文献",
-            "Data availability": "数据可得性", "Funding": "基金", "Conflict of interest": "利益冲突",
-            "Ethics statement": "伦理声明",
-        }
-    else:
-        names = {}
-    sections = []
-    for name in found:
-        sections.append({
-            "name": names.get(name, name),
-            "canonical": name,
-            "aliases": [name] + [a for a in dict(SECTION_ALIASES)[name]],
-            "min_words": SECTION_MIN_WORDS.get(name, 60),
-            "required": True,
-        })
-    if not sections:
-        for name, _ in SECTION_ALIASES[:7]:
-            sections.append({
-                "name": names.get(name, name),
-                "canonical": name,
-                "aliases": [name] + list(dict(SECTION_ALIASES)[name]),
-                "min_words": SECTION_MIN_WORDS.get(name, 60),
-                "required": False,
-            })
-        return {"source": "skill_default_advisory", "genre": genre, "sections": sections,
-                "declarations": ["data_availability"],
-                "require_references": False, "require_doi": False,
-                "note": "task.md did not name sections; set required=true for the sections it asks for"}
-    return {"source": "task_detected", "genre": genre, "sections": sections,
-            "declarations": ["data_availability"] if "Data availability" in found else [],
-            "require_references": "References" in found or "references" in text,
-            "require_doi": "doi" in text}
+def is_readable_text(text):
+    return not text.startswith(UNREADABLE_PREFIX) and not text.startswith("[unsupported type")
 
 
 # ---------------------------------------------------------------- commands
 def cmd_init(a):
     case_path = find_case_file(a.case)
-    out = a.out
     if not case_path:
-        dump({"status": "blocked", "missing": "case.json not found",
-              "searched": ["/input/case.json", "case.json", "/app/input/case.json"]},
-             os.path.join(out, "contract.json"))
+        dump({"status": "blocked", "missing": "case.json not found"}, os.path.join(a.out, "contract.json"))
         print("blocked: case.json not found")
         return 1
-    case = load_json(case_path)
+    try:
+        case = load_json(case_path)
+    except (OSError, ValueError) as exc:
+        dump({"status": "blocked", "missing": "case.json is not valid JSON: %s" % exc},
+             os.path.join(a.out, "contract.json"))
+        print("blocked: case.json is not valid JSON: %s" % exc)
+        return 1
+    if not isinstance(case, dict):
+        dump({"status": "blocked", "missing": "case.json must be a JSON object"},
+             os.path.join(a.out, "contract.json"))
+        print("blocked: case.json must be a JSON object")
+        return 1
     norm = {k: pick(case, k) for k in ALIASES}
-    inline = materialize_inline(case, out)
     contract = norm.get("output_contract") or {}
-    if isinstance(contract, list):
-        contract = {"fields": contract}
-    task = norm.get("task") or ""
-    task_md_text = ""
-    task_path = os.path.join(os.path.dirname(os.path.abspath(case_path)), "task.md")
-    if os.path.exists(task_path):
-        task_md_text = open(task_path, encoding="utf-8", errors="replace").read()
-    tpl = detect_template(task, norm.get("genre"), norm.get("language"))
-    if tpl.get("source") == "skill_default_advisory" and task_md_text.strip():
-        broader = detect_template(task + "\n" + task_md_text, norm.get("genre"), norm.get("language"))
-        if broader.get("source") == "task_detected":
-            for sec in broader.get("sections", []):
-                sec["required"] = False
-            broader["source"] = "task_md_advisory"
-            broader["note"] = ("sections detected from the full brief; set required=true only for the "
-                               "sections the actual case instruction asks for")
-            tpl = broader
+    field_names = contract_field_names(contract)
+    base_dir = os.path.dirname(os.path.abspath(case_path))
+    task_md = os.path.join(base_dir, "task.md")
     result = {
         "case_path": os.path.abspath(case_path),
+        "case_dir": base_dir,
         "case_id": norm.get("case_id") or os.path.splitext(os.path.basename(case_path))[0],
         "task": norm.get("task"),
+        "task_md_path": task_md if os.path.exists(task_md) else None,
+        "task_md_text": open(task_md, encoding="utf-8", errors="replace").read()
+        if os.path.exists(task_md) else None,
         "language": norm.get("language"),
         "genre": norm.get("genre"),
         "audience": norm.get("audience"),
+        "materials": norm.get("materials"),
         "raw_keys": sorted(case.keys()),
         "contract_source": "case.output_contract" if norm.get("output_contract") else "skill_default",
         "contract": contract,
-        "default_contract": DEFAULT_CONTRACT,
-        "materials_discovered": _resolve_materials(case, case_path) + inline,
+        "contract_fields": field_names,
     }
-    dump(result, os.path.join(out, "contract.json"))
-    dump(case, os.path.join(out, "case.raw.json"))
-    tpl_path = os.path.join(out, "section_template.json")
-    if not os.path.exists(tpl_path) or a.force_template:
-        dump(tpl, tpl_path)
-    else:
-        print("keep existing %s (pass --force-template to regenerate)" % tpl_path)
-    if not contract:
-        print("warn: case.json has no output_contract; skill default contract will be used")
-    print("case_id=%s keys=%s materials=%d"
-          % (result["case_id"], ",".join(result["raw_keys"]), len(result["materials_discovered"])))
+    dump(result, os.path.join(a.out, "contract.json"))
+    dump(case, os.path.join(a.out, "case.raw.json"))
+    if not field_names:
+        print("warn: case.json has no output_contract fields; using skill default contract")
+    print("case_id=%s fields=%d keys=%s"
+          % (result["case_id"], len(field_names), ",".join(result["raw_keys"])))
     return 0
+
+
+def _candidate_materials(contract):
+    """Collect explicit material paths, inline materials and conventional dirs."""
+    case_dir = contract.get("case_dir") or os.getcwd()
+    raw = contract.get("materials") or []
+    paths, inline = [], []
+    if isinstance(raw, str):
+        raw = [raw]
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            p = item if os.path.isabs(item) else os.path.join(case_dir, item)
+            paths.append(p)
+        elif isinstance(item, dict):
+            p = item.get("path") or item.get("file") or item.get("name")
+            content = item.get("content") or item.get("text")
+            if content:
+                inline.append((str(p or "inline_material.txt"), str(content)))
+            elif p:
+                paths.append(p if os.path.isabs(str(p)) else os.path.join(case_dir, str(p)))
+    if not paths:
+        for name in ("materials", "input", "data", "resources"):
+            cand = os.path.join(case_dir, name)
+            if os.path.isdir(cand):
+                paths.append(cand)
+    if not paths:
+        paths.append(case_dir)
+    return paths, inline
 
 
 def cmd_index(a):
-    case_path = find_case_file(a.case)
-    roots = []
-    inline = []
-    if case_path:
-        case = load_json(case_path)
-        inline = materialize_inline(case, a.out)
-    if a.materials:
-        roots = [p for p in a.materials if os.path.exists(p)]
-    elif case_path:
-        roots = _resolve_materials(load_json(case_path), case_path)
-    roots += inline
-    if not roots:
-        roots = [p for p in ("/input/materials", "/input") if os.path.isdir(p)]
-    if not roots:
-        print("blocked: no material path found; pass --materials or put source_text in case.json")
-        return 1
-
-    items, corpus, facts, refs, skipped = [], [], [], [], []
-    for p in _walk_files(roots):
-        text = extract(p)
-        readable = not text.startswith(UNREADABLE_PREFIX)
-        size = os.path.getsize(p)
-        items.append({
-            "path": p,
-            "bytes": size,
-            "chars": len(text),
-            "readable": readable,
-            "ext": os.path.splitext(p)[1].lower(),
-            "sha1": hashlib.sha1(open(p, "rb").read()).hexdigest(),
-        })
-        if not readable:
-            skipped.append(p)
-            continue
-        corpus.append("===== FILE: %s =====\n%s" % (p, text))
-        if os.path.splitext(p)[1].lower() == ".bib":
-            refs.extend(parse_bib(text))
-        else:
-            facts.extend(build_facts(p, text))
-    if len(facts) > a.fact_cap:
-        facts = facts[:a.fact_cap]
-    for i, f in enumerate(facts, start=1):
-        f["candidate_id"] = "C%04d" % i
-    os.makedirs(a.out, exist_ok=True)
-    if not items:
-        dump({"files": [], "total_chars": 0, "readable_files": [], "unreadable": [],
-              "facts_total": 0, "blocked": "no files found under %s" % roots},
+    contract = load_json(os.path.join(a.out, "contract.json")) \
+        if os.path.exists(os.path.join(a.out, "contract.json")) else {}
+    if contract.get("status") == "blocked":
+        dump({"status": "blocked", "missing": contract.get("missing")},
              os.path.join(a.out, "evidence.json"))
-        print("blocked: no files found under %s; check the --materials path" % roots)
+        print("blocked: %s" % contract.get("missing"))
         return 1
-    corpus_text = "\n\n".join(corpus)
+    roots = [p for p in (a.materials or []) if os.path.exists(p)]
+    inline = []
+    if not roots:
+        roots, inline = _candidate_materials(contract)
+        roots = [p for p in roots if os.path.exists(p)]
+    contract_materials = contract.get("materials") or []
+    if isinstance(contract_materials, list):
+        for item in contract_materials:
+            if isinstance(item, dict) and (item.get("content") or item.get("text")):
+                inline.append((str(item.get("path") or item.get("name") or "inline_material.txt"),
+                               str(item.get("content") or item.get("text"))))
+    if not roots and not inline:
+        dump({"status": "blocked", "missing": "no material files found"},
+             os.path.join(a.out, "evidence.json"))
+        print("blocked: no material files found")
+        return 1
+    os.makedirs(a.out, exist_ok=True)
+    inline_dir = os.path.join(a.out, "inline")
+    for name, body in inline:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(name)) or "inline_material.txt"
+        p = os.path.join(inline_dir, safe)
+        os.makedirs(inline_dir, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        roots.append(p)
+
+    items, corpus, seen = [], [], set()
+    explicit = bool(a.materials)
+    reserved = {"case.json", "task.md", "draft.json", "result.json", "manuscript.md",
+                "contract.json", "evidence.json", "audit.json", "claims.json",
+                "source_map.json", "todo.md", "case.raw.json"}
+    for root in roots:
+        root = os.path.abspath(root)
+        walk = [(os.path.dirname(root), [], [os.path.basename(root)])] if os.path.isfile(root) \
+            else os.walk(root)
+        for dirpath, dirnames, names in walk:
+            dirnames[:] = [d for d in dirnames if d not in ("__pycache__", "work", "output")]
+            for n in sorted(names):
+                if os.path.isfile(root):
+                    p = root
+                else:
+                    p = os.path.join(dirpath, n)
+                if not os.path.isfile(p) or n.startswith("."):
+                    continue
+                if not explicit and not os.path.isfile(root) and n in reserved:
+                    continue
+                real = os.path.realpath(p)
+                if real in seen:
+                    continue
+                seen.add(real)
+                text = extract(p)
+                items.append({
+                    "path": p,
+                    "bytes": os.path.getsize(p),
+                    "chars": len(text),
+                    "readable": is_readable_text(text),
+                    "sha1": __import__("hashlib").sha1(open(p, "rb").read()).hexdigest(),
+                })
+                corpus.append("===== FILE: %s =====\n%s" % (p, text))
     dump({"files": items, "total_chars": sum(i["chars"] for i in items),
-          "readable_files": [i["path"] for i in items if i["readable"]],
-          "unreadable": skipped,
-          "facts_total": len(facts), "fact_cap": a.fact_cap},
+          "unreadable": [i["path"] for i in items if not i["readable"]]},
          os.path.join(a.out, "evidence.json"))
-    dump(facts, os.path.join(a.out, "facts.json"))
-    auto = os.path.join(a.out, "references.auto.json")
-    if refs:
-        dump(refs, auto)
-    elif os.path.exists(auto):
-        os.remove(auto)
     with open(os.path.join(a.out, "corpus.txt"), "w", encoding="utf-8") as fh:
-        fh.write(corpus_text)
+        fh.write("\n\n".join(corpus))
     for i in items:
         print("%-8s %8d  %s" % ("ok" if i["readable"] else "UNREAD", i["chars"], i["path"]))
-    print("facts=%d references_auto=%d unreadable=%d" % (len(facts), len(refs), len(skipped)))
     return 0
 
 
-# ---------------------------------------------------------------- verification
-def _norm_num(tok):
-    return tok.replace(",", " ").strip()
+def _render_reference(entry, index):
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return str(entry)
+    if "raw" in entry and entry["raw"]:
+        return str(entry["raw"])
+    parts = []
+    authors = entry.get("authors")
+    if isinstance(authors, list):
+        authors = ", ".join(str(x) for x in authors)
+    if authors:
+        parts.append(str(authors).rstrip(".") + ".")
+    if entry.get("title"):
+        parts.append(str(entry["title"]).rstrip(".") + ".")
+    tail = []
+    if entry.get("journal"):
+        tail.append(str(entry["journal"]))
+    if entry.get("year"):
+        tail.append(str(entry["year"]))
+    if tail:
+        parts.append(", ".join(tail) + ".")
+    if entry.get("doi"):
+        parts.append("doi:%s" % entry["doi"])
+    body = " ".join(parts).strip()
+    return "[%d] %s" % (index, body) if entry.get("numbered", True) else body
 
 
-def _num_in_text(tok, text):
-    """Token-aware membership: 12.4 is not satisfied by 12.45; 12.4% matches 12.4."""
-    core = _norm_num(tok).rstrip("%‰")
-    if not core:
-        return False
-    blob = _norm_num(text)
-    for m in re.finditer(re.escape(core), blob):
-        before = blob[m.start() - 1] if m.start() > 0 else ""
-        after = blob[m.end()] if m.end() < len(blob) else ""
-        if not before.isdigit() and not after.isdigit():
-            return True
-    return False
-
-
-def _load_refs(evidence_dir, plan_path=""):
-    refs = []
-    for name in ("references.json", "references.auto.json"):
-        p = os.path.join(evidence_dir, name)
-        if os.path.exists(p):
-            data = load_json(p)
-            if isinstance(data, list):
-                refs.extend(data)
-    if plan_path and os.path.exists(plan_path):
-        try:
-            plan = load_json(plan_path)
-            refs.extend(plan.get("references") or [])
-        except Exception:  # noqa: BLE001
-            pass
-    return refs
-
-
-def _citation_tokens(text):
-    return list(dict.fromkeys(m.group(0) for m in CITE_RE.finditer(text)))
-
-
-def _expand_bracket(tok):
-    inner = tok.strip("[]")
-    out = []
-    for part in re.split(r"[,;]", inner):
-        part = part.strip()
-        m = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", part)
-        if m:
-            lo, hi = int(m.group(1)), int(m.group(2))
-            if 0 < hi - lo <= 50:
-                out.extend(range(lo, hi + 1))
-        elif part.isdigit():
-            out.append(int(part))
-    return out
-
-
-def _author_year_hit(tok, corpus, refs):
-    inner = tok.strip("()")
-    m = re.match(r"([A-Z][A-Za-z\-]+).*?((?:19|20)\d{2})", inner)
-    if not m:
-        return False
-    surname, year = m.group(1).lower(), m.group(2)
-    if re.search(re.escape(surname) + r"[^\n]{0,60}" + re.escape(year), corpus, re.I):
-        return True
-    for r in refs:
-        authors = str(r.get("authors") or r.get("author") or "")
-        if surname in authors.lower() and str(r.get("year") or "") == year:
-            return True
-    return False
-
-
-def cmd_verify(a):
-    corpus = open(os.path.join(a.evidence_dir, "corpus.txt"), encoding="utf-8").read()
-    ev = load_json(os.path.join(a.evidence_dir, "evidence.json"))
-    draft = open(a.text, encoding="utf-8").read()
-    refs = _load_refs(a.evidence_dir, a.plan)
-    ref_keys = {str(r.get("key")) for r in refs if r.get("key")}
-    numbered_refs = [r for r in refs if str(r.get("index", "")).isdigit()]
-    max_ref = max([int(r["index"]) for r in numbered_refs], default=len(refs))
-
-    structural = set(STRUCT_RE.findall(draft))
-    numbers, unsupported, structural_nums = [], [], []
-    for m in NUM_RE.finditer(draft):
-        tok = m.group(0).strip()
-        if not tok:
-            continue
-        numbers.append(tok)
-        bare = _norm_num(tok).rstrip("%‰")
-        if bare in structural:
-            structural_nums.append(tok)
-        elif not _num_in_text(tok, corpus):
-            unsupported.append(tok)
-
-    unresolved = []
-    for c in _citation_tokens(draft):
-        if c.startswith("\\cite"):
-            key = c[len("\\cite{"):-1].strip()
-            if key not in ref_keys and key not in corpus:
-                unresolved.append({"citation": c, "reason": "key not in bib/reference registry"})
-        elif c.startswith("["):
-            idxs = _expand_bracket(c)
-            if refs:
-                ok = bool(idxs) and max(idxs) <= max_ref
-                if not ok:
-                    unresolved.append({"citation": c, "reason": "index exceeds %d reference entries" % max_ref})
-            else:
-                exact = c.strip()
-                ok = exact in corpus or (bool(idxs) and all(
-                    re.search(r"\[\s*%d\s*\]" % n, corpus) for n in idxs))
-                if not ok:
-                    unresolved.append({"citation": c, "reason": "no matching bracketed reference in materials"})
-        else:
-            if not _author_year_hit(c, corpus, refs):
-                unresolved.append({"citation": c, "reason": "author-year not found in materials/references"})
-
-    report = {
-        "draft": os.path.abspath(a.text),
-        "numbers_total": len(numbers),
-        "numbers_unique": len(set(numbers)),
-        "structural_numbers": sorted(set(structural_nums))[:100],
-        "unsupported_numbers": list(dict.fromkeys(unsupported))[:200],
-        "citations_unique": len(_citation_tokens(draft)),
-        "citations_unresolved": unresolved[:200],
-        "references_loaded": len(refs),
-        "numbered_reference_max": max_ref,
-        "unreadable_sources": ev.get("unreadable", []),
-        "verdict": "pass" if not unsupported and not unresolved else "review",
-    }
-    dump(report, os.path.join(a.out, "claims.json"))
-    print("verdict=%s unsupported_numbers=%d citations_unresolved=%d"
-          % (report["verdict"], len(report["unsupported_numbers"]), len(unresolved)))
-    for n in report["unsupported_numbers"][:20]:
-        print("  ? number not in sources:", n)
-    for c in unresolved[:10]:
-        print("  ? citation:", c["citation"], "-", c["reason"])
-    return 0
-
-
-# ---------------------------------------------------------------- rendering
-def _split_words(text):
-    return len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", text or ""))
-
-
-def _render_reference(entry, style, index):
-    authors = str(entry.get("authors") or entry.get("author") or "").strip()
-    year = str(entry.get("year") or "").strip()
-    title = str(entry.get("title") or "").strip()
-    venue = str(entry.get("venue") or entry.get("journal") or "").strip()
-    volume = str(entry.get("volume") or "").strip()
-    pages = str(entry.get("pages") or "").strip()
-    doi = str(entry.get("doi") or "").strip()
-    body = ", ".join(x for x in (authors, year) if x)
-    if title:
-        body += (". " if body else "") + title
-    if venue:
-        body += (". " if body else "") + venue
-    if volume:
-        body += ", " + volume
-    if pages:
-        body += ": " + pages
-    if doi:
-        body += ". doi:" + doi
-    body = body.rstrip(".")
-    if style == "numbered":
-        return "[%d] %s." % (index, body)
-    return body + "."
-
-
-def _detect_style(text, plan):
-    if plan.get("reference_style") in ("numbered", "author-year"):
-        return plan["reference_style"]
-    return "author-year" if re.search(r"\([A-Z][A-Za-z\-]+,?\s?(?:et al\.,?\s?)?(?:19|20)\d{2}\)", text) else "numbered"
-
-
-def _render_manuscript(plan):
+def render_manuscript(plan):
+    """Render an editable manuscript from a draft JSON (sections/figures/tables/refs)."""
     lines = []
     if plan.get("title"):
         lines += ["# %s" % plan["title"], ""]
@@ -730,194 +366,320 @@ def _render_manuscript(plan):
             text = para if isinstance(para, str) else str(para.get("text") or "")
             if not text.strip():
                 continue
-            if isinstance(para, dict) and para.get("placeholder"):
-                text = "【待补：%s】%s" % (para["placeholder"], text)
             lines += [text.strip(), ""]
-        body = "\n".join(lines)
         for i, fig in enumerate(figures):
             if i in placed_figs:
                 continue
             label = str(fig.get("label") or "Figure %d" % (i + 1))
-            if fig.get("section") and str(fig["section"]).lower() == heading.lower():
-                lines += ["%s. %s" % (label, str(fig.get("caption") or "").strip()), ""]
-                placed_figs.add(i)
-            elif not fig.get("section") and re.search(re.escape(label) + r"\b", body):
+            if str(fig.get("section") or "").lower() == heading.lower():
                 lines += ["%s. %s" % (label, str(fig.get("caption") or "").strip()), ""]
                 placed_figs.add(i)
         for i, tab in enumerate(tables):
             if i in placed_tabs:
                 continue
             label = str(tab.get("label") or "Table %d" % (i + 1))
-            if tab.get("section") and str(tab["section"]).lower() == heading.lower():
+            if str(tab.get("section") or "").lower() == heading.lower():
                 lines += ["%s. %s" % (label, str(tab.get("caption") or "").strip()), ""]
                 placed_tabs.add(i)
-    remaining_figs = [f for i, f in enumerate(figures) if i not in placed_figs]
-    remaining_tabs = [t for i, t in enumerate(tables) if i not in placed_tabs]
-    if remaining_figs:
-        lines += ["## Figures", ""]
-        for i, fig in enumerate(figures):
-            if i in placed_figs:
-                continue
-            label = str(fig.get("label") or "Figure %d" % (i + 1))
-            lines += ["%s. %s" % (label, str(fig.get("caption") or "").strip()), ""]
-    if remaining_tabs:
-        lines += ["## Tables", ""]
-        for i, tab in enumerate(tables):
-            if i in placed_tabs:
-                continue
-            label = str(tab.get("label") or "Table %d" % (i + 1))
-            lines += ["%s. %s" % (label, str(tab.get("caption") or "").strip()), ""]
-
-    headings = [str(s.get("heading") or s.get("name") or "").lower() for s in plan.get("sections") or []]
+    for tag, remaining, kind in (("Figures", figures, "fig"), ("Tables", tables, "tab")):
+        pending = [x for i, x in enumerate(remaining)
+                   if i not in (placed_figs if kind == "fig" else placed_tabs)]
+        if pending:
+            lines += ["## %s" % tag, ""]
+            for i, obj in enumerate(remaining):
+                if i in (placed_figs if kind == "fig" else placed_tabs):
+                    continue
+                label = str(obj.get("label") or ("Figure %d" if kind == "fig" else "Table %d")
+                            % (i + 1))
+                lines += ["%s. %s" % (label, str(obj.get("caption") or "").strip()), ""]
+    headings = [str(s.get("heading") or s.get("name") or "").lower()
+                for s in plan.get("sections") or []]
     refs = plan.get("references") or []
-    if refs and not any(h in ("references", "参考文献", "bibliography") for h in headings):
-        style = _detect_style("\n".join(lines), plan)
+    if refs and not any(h in REF_HEADINGS for h in headings):
         lines += ["## References", ""]
         for i, r in enumerate(refs, start=1):
-            lines += [_render_reference(r, style, i), ""]
+            lines += [_render_reference(r, i), ""]
     decl = plan.get("declarations") or {}
-    decl_titles = {
-        "data_availability": "Data availability", "funding": "Funding",
-        "conflict_of_interest": "Conflict of interest", "ethics": "Ethics statement",
-    }
-    for key, title in decl_titles.items():
+    titles = {"data_availability": "Data availability", "funding": "Funding",
+              "conflict_of_interest": "Conflict of interest", "ethics": "Ethics statement"}
+    for key, title in titles.items():
         val = str(decl.get(key) or "").strip()
         if val and title.lower() not in headings:
             lines += ["## %s" % title, "", val, ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _write_todo(plan, out_dir):
-    uncertainty = plan.get("uncertainty") or []
-    conflicts = plan.get("conflicts") or []
-    todo = plan.get("todo") or []
-    lines = ["# 待补 / 待核清单", "",
-             "本文件由 scripts/kernel.py build 生成。以下条目未在材料中得到确认，禁止当作已核实结论。", ""]
-    if not uncertainty and not conflicts and not todo:
-        lines.append("- 无。")
-    for item in conflicts:
-        lines.append("- [冲突] %s：%s（%s）" % (item.get("where", "-"), item.get("what", "-"), item.get("why", "")))
-    for item in uncertainty:
-        lines.append("- [%s] %s：%s（%s）" % (item.get("type", "uncertain"),
-                                             item.get("where", "-"), item.get("what", "-"), item.get("why", "")))
-    for item in todo:
-        if isinstance(item, dict):
-            lines.append("- [待核] %s：%s" % (item.get("where", "-"), item.get("what", "-")))
-        else:
-            lines.append("- [待核] %s" % item)
-    with open(os.path.join(out_dir, "todo.md"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-
-
 def cmd_build(a):
     plan = load_json(a.draft)
-    text = _render_manuscript(plan)
+    text = render_manuscript(plan)
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "manuscript.md"), "w", encoding="utf-8") as fh:
         fh.write(text)
     source_map = plan.get("source_map") or []
-    dump({"source_map": source_map, "entries": len(source_map)}, os.path.join(a.out, "source_map.json"))
-    rows = ["claim,value,source_path,locator,fact_id"]
-    for e in source_map:
-        rows.append(",".join('"%s"' % str(e.get(k, "")).replace('"', '""')
-                             for k in ("claim", "value", "source_path", "locator", "fact_id")))
-    with open(os.path.join(a.out, "source_map.csv"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(rows) + "\n")
-    _write_todo(plan, a.out)
+    dump({"source_map": source_map, "entries": len(source_map)},
+         os.path.join(a.out, "source_map.json"))
     print("rendered manuscript.md chars=%d sections=%d source_map=%d"
           % (len(text), len(plan.get("sections") or []), len(source_map)))
     return 0
 
 
-# ---------------------------------------------------------------- emit / check
-def _contract_of(contract_path):
-    if not os.path.exists(contract_path):
-        return {}
-    data = load_json(contract_path)
-    contract = data.get("contract") or {}
-    return contract if isinstance(contract, dict) else {}
+def _numbers(text):
+    out = []
+    for m in NUM_RE.finditer(text):
+        tok = m.group(0).strip()
+        if len(tok) < 2 and not tok.isdigit():
+            continue
+        out.append(tok)
+    return out
+
+
+def _num_value(token):
+    t = str(token).strip().replace(",", "").replace("，", "")
+    t = re.sub(r"\s?[%‰]$", "", t)
+    t = re.sub(r"^[^\d.+-]+|[^\d.]+$", "", t)
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return None
+
+
+def _number_values(text):
+    vals = set()
+    for tok in _numbers(text):
+        v = _num_value(tok)
+        if v is not None:
+            vals.add(round(v, 10))
+    return vals
+
+
+def _citation_tokens(text):
+    tokens = []
+    for m in CITE_RE.finditer(text):
+        tok = m.group(1).strip()
+        if tok not in tokens:
+            tokens.append(tok)
+    return tokens
+
+
+STRUCT_LABEL_RE = re.compile(r"(?i)\b(?:figure|fig\.?|table)\s*\d+[A-Za-z]?|[图表]\s*\d+[A-Za-z]?")
+HEADING_NUM_RE = re.compile(r"(?m)^(\s*(?:#{1,6}\s*)?)"
+                            r"(?:\d+(?:\.\d+)*[\.、]?|[一二三四五六七八九十百]+[、.]|第[一二三四五六七八九十百]+[章节])\s*")
+
+
+def _audit_text(text):
+    """Drop citations, heading numbers, caption labels and reference entries.
+
+    Those numbers are structural, not factual claims, so they must not be
+    reported as unsupported values.
+    """
+    text = CITE_RE.sub(" ", text)
+    kept, in_refs = [], False
+    for line in text.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            in_refs = m.group(2).strip().lower() in REF_HEADINGS
+            line = HEADING_NUM_RE.sub(r"\1", line)
+        if in_refs:
+            continue
+        kept.append(STRUCT_LABEL_RE.sub(" ", line))
+    return "\n".join(kept)
+
+
+def _reference_registry(corpus):
+    numbers = {int(n) for n in re.findall(r"(?m)^\s*\[(\d+)\]", corpus)}
+    bib_keys = set(re.findall(r"@\w+\s*\{\s*([^,\s]+)\s*,", corpus))
+    return numbers, bib_keys
+
+
+def _check_citations(tokens, corpus, numbers, bib_keys):
+    unresolved = []
+    for tok in tokens:
+        if tok.startswith("\\cite{"):
+            key = tok[len("\\cite{"):-1].split(",")[0].strip()
+            if key and key not in corpus and key not in bib_keys:
+                unresolved.append({"citation": tok, "reason": "bib key not in sources"})
+            continue
+        if tok.startswith("["):
+            idxs = []
+            for part in tok.strip("[]").split(","):
+                part = part.strip()
+                if re.match(r"^\d+$", part):
+                    idxs.append(int(part))
+                elif re.match(r"^\d+\s*[-–]\s*\d+$", part):
+                    a, b = re.split(r"[-–]", part)
+                    idxs.extend(range(int(a), int(b) + 1))
+            if not idxs:
+                continue
+            missing = [i for i in idxs
+                       if (numbers and i not in numbers) or (not numbers and not bib_keys)]
+            if not numbers and not bib_keys:
+                unresolved.append({"citation": tok,
+                                   "reason": "no reference list or bib file in sources"})
+            elif missing:
+                unresolved.append({"citation": tok, "reason": "index not in reference list %s"
+                                   % missing})
+            continue
+        body = tok.strip("()")
+        m = re.search(r"([A-Z][A-Za-z\-]+).*?((?:19|20)\d{2})", body)
+        if m:
+            author, year = m.group(1), m.group(2)
+            if not re.search(re.escape(author) + r"[^\n]{0,200}" + year, corpus):
+                unresolved.append({"citation": tok,
+                                   "reason": "author/year pair not found in sources"})
+    return unresolved
+
+
+def cmd_verify(a):
+    corpus = open(os.path.join(a.evidence_dir, "corpus.txt"), encoding="utf-8").read()
+    ev = load_json(os.path.join(a.evidence_dir, "evidence.json"))
+    draft = open(a.text, encoding="utf-8").read()
+    corpus_values = _number_values(corpus)
+    numbers = _numbers(_audit_text(draft))
+    unsupported = []
+    for tok in dict.fromkeys(numbers):
+        v = _num_value(tok)
+        if v is None:
+            continue
+        if round(v, 10) not in corpus_values:
+            unsupported.append(tok)
+    cites = _citation_tokens(draft)
+    registry, bib_keys = _reference_registry(corpus)
+    unresolved = _check_citations(cites, corpus, registry, bib_keys)
+    report = {
+        "draft": os.path.abspath(a.text),
+        "numbers_total": len(numbers),
+        "numbers_unique": len(set(numbers)),
+        "unsupported_numbers": unsupported[:200],
+        "citations_unique": len(cites),
+        "citations_not_in_sources": [c["citation"] for c in unresolved][:200],
+        "citations_unresolved": unresolved[:200],
+        "unreadable_sources": ev.get("unreadable", []),
+        "verdict": "pass" if not unsupported and not unresolved else "review",
+    }
+    dump(report, os.path.join(a.out, "claims.json"))
+    print("verdict=%s unsupported_numbers=%d citations_not_in_sources=%d"
+          % (report["verdict"], len(unsupported), len(unresolved)))
+    for n in unsupported[:20]:
+        print("  ? number not in sources:", n)
+    for c in unresolved[:10]:
+        print("  ? citation not in sources:", c["citation"], "-", c["reason"])
+    return 0
+
+
+def _artifact_text(draft, work_dir):
+    artifacts = draft.get("artifacts") if isinstance(draft.get("artifacts"), dict) else {}
+    if isinstance(artifacts.get("manuscript.md"), str):
+        return artifacts["manuscript.md"], artifacts
+    path = os.path.join(work_dir, "manuscript.md")
+    if os.path.exists(path):
+        return open(path, encoding="utf-8", errors="replace").read(), artifacts
+    if draft.get("sections"):
+        return render_manuscript(draft), artifacts
+    return None, artifacts
 
 
 def cmd_emit(a):
     contract_path = os.path.join(a.contract_dir, "contract.json") \
         if os.path.isdir(a.contract_dir) else a.contract_dir
-    contract = _contract_of(contract_path)
-    draft = load_json(a.draft)
-    fields = draft.get("fields") if isinstance(draft.get("fields"), dict) else {}
+    contract = load_json(contract_path) if os.path.exists(contract_path) else {}
+    try:
+        draft = load_json(a.draft)
+    except (OSError, ValueError) as exc:
+        names = contract_field_names(contract.get("contract", contract))
+        result = {"case_id": contract.get("case_id"), "status": "blocked",
+                  "limits": "draft.json is not readable: %s" % exc,
+                  "uncertainty": [], "conflicts": [], "changes": [], "sources": [],
+                  "source_map": [], "self_check": {"audit_verdict": "not_run",
+                                                   "error": str(exc)}}
+        for name in names:
+            result.setdefault(name, None)
+        os.makedirs(a.out, exist_ok=True)
+        dump(result, os.path.join(a.out, "result.json"))
+        print("blocked: draft.json is not readable: %s" % exc)
+        return 1
+    names = contract_field_names(contract.get("contract", contract))
 
-    result = {}
-    for key in REQUIRED_RESULT_FIELDS:
-        result[key] = DEFAULT_CONTRACT.get(key)
-    for key, default in DEFAULT_CONTRACT.items():
-        if result.get(key) is None:
-            result[key] = default
-    if os.path.exists(contract_path):
-        result["case_id"] = load_json(contract_path).get("case_id")
-    result["case_id"] = draft.get("case_id") or result.get("case_id")
-    result["status"] = draft.get("status", "partial")
-
-    for key, value in fields.items():
+    text, artifacts = _artifact_text(draft, a.work_dir)
+    result = {"case_id": draft.get("case_id") or contract.get("case_id"),
+              "status": draft.get("status", "partial")}
+    for key in ("uncertainty", "conflicts", "changes", "sources", "limits", "title",
+                "references", "figures", "tables"):
+        if key in draft:
+            result[key] = draft[key]
+    for key, value in (draft.get("fields") or {}).items():
         if value is not None:
             result[key] = value
     for key, value in draft.items():
-        if key in ("fields", "artifacts", "sections"):
+        if key in ("fields", "artifacts", "sections", "status", "case_id"):
             continue
         if value is not None:
             result[key] = value
-
-    # artifacts and their declared paths
-    artifacts = draft.get("artifacts") if isinstance(draft.get("artifacts"), dict) else {}
-    if not artifacts and os.path.exists(os.path.join(a.work_dir, "manuscript.md")):
-        artifacts["manuscript.md"] = open(os.path.join(a.work_dir, "manuscript.md"), encoding="utf-8").read()
-    if "manuscript.md" not in artifacts and draft.get("sections"):
-        artifacts["manuscript.md"] = _render_manuscript(draft)
-    if not artifacts and result.get("status") in ("blocked", "refused"):
-        artifacts["manuscript.md"] = (
-            "# 无法完成\n\nstatus: %s\n\n%s\n"
-            % (result.get("status"),
-               str(result.get("limits") or "材料不足，未生成稿件。请补齐材料后重跑。")))
-    result.setdefault("artifact_path", "manuscript.md")
-    if not result.get("artifact_format"):
-        result["artifact_format"] = os.path.splitext(str(result.get("artifact_path")))[1].lstrip(".") or "md"
-
-    # source map: draft wins, else build output
     if not result.get("source_map"):
         sm = os.path.join(a.work_dir, "source_map.json")
         if os.path.exists(sm):
             result["source_map"] = load_json(sm).get("source_map", [])
-    for key in ("source_map", "changes", "uncertainty", "conflicts", "todo", "references", "figures", "tables"):
-        if result.get(key) is None:
-            result[key] = []
-    if result.get("limits") is None:
-        result["limits"] = ""
-
-    # audit summary and hard stop on fail
-    if a.audit and os.path.exists(a.audit):
-        audit = load_json(a.audit)
+    audit_path = os.path.join(a.work_dir, "audit.json")
+    audit = load_json(audit_path) if os.path.exists(audit_path) else None
+    if audit:
+        result["audit"] = audit
         result["self_check"] = {
             "audit_verdict": audit.get("verdict"),
-            "sections_missing": audit.get("sections_missing", []),
-            "sections_out_of_order": audit.get("sections_out_of_order", []),
+            "problems": audit.get("problems", []),
+            "warnings": audit.get("warnings", [])[:20],
             "numbers_unbound": audit.get("numbers_unbound", []),
             "citations_unresolved": audit.get("citations_unresolved", []),
+            "sections_missing": audit.get("sections_missing", []),
+            "sections_out_of_order": audit.get("sections_out_of_order", []),
             "conflicts": audit.get("conflicts", []),
             "placeholders_unregistered": audit.get("placeholders_unregistered", []),
-            "figure_problems": audit.get("figure_problems", []),
             "declarations_missing": audit.get("declarations_missing", []),
-            "reference_problems": audit.get("reference_problems", []),
+            "figure_problems": audit.get("figure_problems", []),
         }
-        if audit.get("todo"):
-            result["todo"] = audit["todo"]
-        if audit.get("conflicts"):
-            result["conflicts"] = audit["conflicts"]
         if audit.get("verdict") == "fail":
             result["status"] = "partial"
-            result["limits"] = (str(result.get("limits") or "") +
-                                " | audit failed: see self_check").strip(" |")
-    if a.source_map and os.path.exists(a.source_map):
-        result["source_map"] = load_json(a.source_map).get("source_map", result["source_map"])
-    if not result.get("self_check"):
+            result["limits"] = (str(result.get("limits") or "").strip() +
+                                " | audit failed: " + "; ".join(audit.get("problems", [])[:3])
+                                ).strip(" |")
+    else:
         result["self_check"] = {"audit_verdict": "not_run"}
+    if not result.get("sources"):
+        ev_path = os.path.join(a.work_dir, "evidence.json")
+        if os.path.exists(ev_path):
+            result["sources"] = [i["path"] for i in load_json(ev_path).get("files", [])
+                                 if i.get("readable")]
+    result.setdefault("uncertainty", [])
+    result.setdefault("conflicts", [])
+    result.setdefault("changes", [])
+    result.setdefault("source_map", [])
+    result.setdefault("sources", [])
+    if result.get("status") in ("partial", "blocked") and not str(result.get("limits") or "").strip():
+        result["limits"] = ("未完成全部要求或存在未核实项；详见 self_check 与 uncertainty。"
+                            if result["status"] == "partial" else "材料不足，未生成所需产物。")
+
+    # contract fields: explicit values, then manuscript/map/audit aliases, then null
+    for name in names:
+        if result.get(name) is not None:
+            continue
+        low = name.lower()
+        if low in MANUSCRIPT_ALIASES and text:
+            result[name] = text
+        elif low in MAP_ALIASES:
+            result[name] = result.get("source_map") or []
+        elif low in AUDIT_ALIASES and audit:
+            result[name] = audit
+        else:
+            result[name] = None
+    missing = [k for k in names if result.get(k) is None]
+    if missing and result.get("status") in ("ok", "success"):
+        result["status"] = "partial"
+        result["limits"] = (str(result.get("limits") or "").strip() +
+                            " | contract fields not producible: " + ", ".join(missing)).strip(" |")
+    artifact_name = "manuscript.md"
+    artifacts = dict(artifacts or {})
+    if text:
+        artifacts[artifact_name] = text
+    result.setdefault("artifact_path", artifact_name)
+    result.setdefault("artifact_format", "md")
 
     os.makedirs(a.out, exist_ok=True)
     dump(result, os.path.join(a.out, "result.json"))
@@ -926,38 +688,34 @@ def cmd_emit(a):
         os.makedirs(os.path.dirname(p) or a.out, exist_ok=True)
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(body)
-    # copy companion artifacts so reviewers can re-check without the work dir
-    for name in ("source_map.json", "source_map.csv", "todo.md", "audit.json", "claims.json", "facts.json"):
+    for name in ("source_map.json", "source_map.csv", "audit.json", "claims.json", "todo.md"):
         src = os.path.join(a.work_dir, name)
-        if os.path.exists(src) and not os.path.exists(os.path.join(a.out, name)):
-            data = open(src, "rb").read()
-            with open(os.path.join(a.out, name), "wb") as fh:
+        if os.path.exists(src):
+            dst = os.path.join(a.out, name)
+            with open(src, "rb") as fh:
+                data = fh.read()
+            with open(dst, "wb") as fh:
                 fh.write(data)
-
-    missing = [k for k in contract if result.get(k) is None]
     print("result.json written; contract_fields=%d missing_contract_fields=%s"
-          % (len(contract), missing or "none"))
-    return 1 if missing else 0
+          % (len(names), missing or "none"))
+    return 0 if not missing else 1
 
 
 def cmd_check(a):
     problems, warns = [], []
-    out = a.out
-    rp = os.path.join(out, "result.json")
+    rp = os.path.join(a.out, "result.json")
     if not os.path.exists(rp):
         print("FAIL\n - result.json missing")
         return 1
     res = load_json(rp)
-    for k in REQUIRED_RESULT_FIELDS:
-        if res.get(k) in (None, ""):
-            if k == "limits" and res.get("status") not in ("partial", "blocked"):
-                continue
+    for k in ("case_id", "status"):
+        if not res.get(k):
             problems.append("result.json missing %s" % k)
     if res.get("status") not in STATUSES:
         problems.append("status must be one of %s" % "/".join(sorted(STATUSES)))
     if res.get("status") in ("partial", "blocked") and not str(res.get("limits") or "").strip():
         problems.append("status=%s but limits is empty" % res["status"])
-    for key in ("source_map", "changes", "uncertainty"):
+    for key in ("source_map", "uncertainty"):
         if not isinstance(res.get(key), list):
             problems.append("%s must be a list" % key)
     for i, entry in enumerate(res.get("source_map") or []):
@@ -968,43 +726,37 @@ def cmd_check(a):
             if not str(entry.get(k, "")).strip():
                 problems.append("source_map[%d] missing %s" % (i, k))
         sp = str(entry.get("source_path") or "")
-        if os.path.isabs(sp):
-            if not os.path.exists(sp):
-                warns.append("source_map[%d] source_path not found now: %s" % (i, sp))
-        elif sp and not os.path.exists(sp) and not os.path.exists(os.path.join(out, sp)):
-            warns.append("source_map[%d] relative source_path unresolved: %s" % (i, sp))
-
+        if sp and os.path.isabs(sp) and not os.path.exists(sp):
+            warns.append("source_map[%d] source_path not found now: %s" % (i, sp))
     artifact = str(res.get("artifact_path") or "")
-    ap = os.path.join(out, artifact) if artifact else ""
+    ap = os.path.join(a.out, artifact) if artifact else ""
     if not artifact:
         problems.append("artifact_path empty")
     elif not os.path.exists(ap):
         problems.append("artifact missing: %s" % artifact)
     elif os.path.getsize(ap) < 32:
         problems.append("artifact is empty/truncated: %s" % artifact)
-    if not os.path.exists(os.path.join(out, "manuscript.md")):
+    if not os.path.exists(os.path.join(a.out, "manuscript.md")):
         problems.append("manuscript.md missing (the editable deliverable)")
-    audit_path = os.path.join(out, "audit.json")
+    audit_path = os.path.join(a.out, "audit.json")
     if os.path.exists(audit_path):
         verdict = load_json(audit_path).get("verdict")
-        if verdict == "fail" and res.get("status") == "ok":
-            problems.append("audit verdict=fail but status=ok")
-    elif res.get("status") in ("ok", "success", "partial"):
-        problems.append("audit.json missing")
-
+        if verdict == "fail" and res.get("status") in ("ok", "success"):
+            problems.append("audit verdict=fail but status=%s" % res.get("status"))
+    else:
+        warns.append("audit.json not found in output; audit evidence is not re-checkable")
     if not isinstance(res.get("self_check"), dict) or not res["self_check"].get("audit_verdict"):
         problems.append("self_check.audit_verdict missing")
-
     cp = os.path.join(a.contract_dir, "contract.json") if a.contract_dir else ""
     if cp and os.path.exists(cp):
-        for name in _contract_of(cp):
+        names = contract_field_names(load_json(cp).get("contract", {}))
+        for name in names:
             if name not in res or res.get(name) is None:
                 problems.append("result.json missing contract field %s" % name)
             elif name != "limits" and isinstance(res.get(name), str) and not res[name].strip():
                 problems.append("result.json empty contract field %s" % name)
     elif a.contract_dir:
         warns.append("contract.json not found; skipped contract-field check")
-
     print("PASS" if not problems else "FAIL")
     for p in problems:
         print(" -", p)
@@ -1018,15 +770,14 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init"); p.add_argument("--case"); p.add_argument("--out", default="work")
-    p.add_argument("--force-template", action="store_true"); p.set_defaults(fn=cmd_init)
-    p = sub.add_parser("index"); p.add_argument("--materials", nargs="*"); p.add_argument("--case")
-    p.add_argument("--out", default="work"); p.add_argument("--fact-cap", type=int, default=4000)
-    p.set_defaults(fn=cmd_index)
-    p = sub.add_parser("build"); p.add_argument("--draft", required=True); p.add_argument("--out", default="work")
-    p.set_defaults(fn=cmd_build)
+    p.set_defaults(fn=cmd_init)
+    p = sub.add_parser("index"); p.add_argument("--materials", nargs="*")
+    p.add_argument("--out", default="work"); p.set_defaults(fn=cmd_index)
+    p = sub.add_parser("build"); p.add_argument("--draft", required=True)
+    p.add_argument("--out", default="work"); p.set_defaults(fn=cmd_build)
     p = sub.add_parser("verify"); p.add_argument("--text", required=True)
-    p.add_argument("--evidence-dir", default="work"); p.add_argument("--plan", default="")
-    p.add_argument("--out", default="work"); p.set_defaults(fn=cmd_verify)
+    p.add_argument("--evidence-dir", default="work"); p.add_argument("--out", default="work")
+    p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("emit"); p.add_argument("--draft", required=True)
     p.add_argument("--contract-dir", default="work"); p.add_argument("--work-dir", default="work")
     p.add_argument("--audit", default=""); p.add_argument("--source-map", default="")

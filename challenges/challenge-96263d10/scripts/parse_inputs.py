@@ -331,9 +331,7 @@ class SpecBuilder:
         if isinstance(obj, dict):
             for key, val in obj.items():
                 path = "%s.%s" % (prefix, key) if prefix else str(key)
-                if isinstance(val, dict) and not all(
-                        isinstance(v, (int, float, str, bool, type(None)))
-                        for v in val.values()):
+                if isinstance(val, dict):
                     out.update(SpecBuilder._flatten(val, path))
                 else:
                     out[path] = val
@@ -1452,7 +1450,8 @@ def parse_docx_manuscript(path):
                                    if C.local(el.tag) in (
                                        "drawing", "pict", "object", "oMath",
                                        "oMathPara", "footnoteReference",
-                                       "commentReference", "txbxContent")})
+                                       "commentReference", "txbxContent",
+                                       "hyperlink")})
                 image_rels = []
                 for el in child.iter():
                     if C.local(el.tag) == "blip":
@@ -1577,12 +1576,15 @@ def parse_markdown_manuscript(text, ext="md"):
     fence_buf = []
     refs_mode = False
     pending_para = []
+    para_start = [0]
 
     def flush_para():
         if not pending_para:
             return
+        start_line = para_start[0] or cur_line
         joined = " ".join(pending_para).strip()
         pending_para[:] = []
+        para_start[0] = 0
         if not joined:
             return
         cap = _caption_parts(joined)
@@ -1592,16 +1594,16 @@ def parse_markdown_manuscript(text, ext="md"):
             if m:
                 label_index = int(m.group(1) or m.group(2))
             parser.add("reference", text=joined, label_index=label_index,
-                       line=cur_line)
+                       line=start_line)
         elif cap:
             parser.add("caption", text=joined, kind=cap["kind"], label=cap["label"],
-                       number=cap["number"], caption_text=cap["text"], line=cur_line)
+                       number=cap["number"], caption_text=cap["text"], line=start_line)
         else:
             lvl = _heading_level_from_text(joined) if ext == "txt" else None
             if lvl:
-                parser.add("heading", text=joined, level=lvl, line=cur_line)
+                parser.add("heading", text=joined, level=lvl, line=start_line)
             else:
-                parser.add("paragraph", text=joined, line=cur_line)
+                parser.add("paragraph", text=joined, line=start_line)
 
     while i < len(lines):
         line = lines[i]
@@ -1704,6 +1706,8 @@ def parse_markdown_manuscript(text, ext="md"):
             i += 1
             continue
         pending_para.append(_strip_markdown_emphasis(stripped) if ext == "md" else stripped)
+        if len(pending_para) == 1:
+            para_start[0] = cur_line
         i += 1
     flush_para()
     if not in_fence and fence_buf:

@@ -29,7 +29,14 @@ ABSENCE_HINTS = ["not reported", "not available", "no data", "not provided",
 NUMBER_RE = re.compile(r"(?<![\w.])([-+]?\d+(?:[.,]\d+)*)\s?([A-Za-zµμ%‰°℃/]+)?")
 
 
+ABSENCE_Q_RE = re.compile(
+    r"^(?:was|were|is|are|did|does|do)\b[^?]{0,80}\breported\b|"
+    r"\bwhether\b[^?]{0,60}\breported\b|是否(?:报告|提及|给出)|有没有", re.I)
+
+
 def infer_type(question, default=None):
+    if ABSENCE_Q_RE.search(question):
+        return "absence"
     low = question.lower()
     for typ, words in TYPE_HINTS:
         if any(w.lower() in low for w in words):

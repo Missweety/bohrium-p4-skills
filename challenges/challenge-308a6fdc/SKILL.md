@@ -1,227 +1,148 @@
 ---
 name: manuscript-evidence-writer
-description: 从给定科研材料（实验记录、数据表、图表、参考文献、补充材料、或 case.json 内嵌原文）生成可编辑的论文稿件，并把每个数字、样本量、图注编号和引用绑定到具体材料位置；产出 manuscript.md、事实—来源映射、离线一致性审计与待核清单，缺数据/冲突显式落盘而不是编造。适用于按模板撰写摘要/引言/方法/结果/讨论/结论或补齐章节；不适用于无材料自由创作、代写数据或纯语言润色。
-version: 2.0.0
+description: 从给定科研材料（实验记录、数据表、图表、参考文献、补充材料）生成可编辑的论文稿件章节，并把每一条事实性陈述绑定到具体材料位置，产出章节稿、事实—来源映射表与一致性审计报告。适用于按学科模板撰写摘要/引言/方法/结果/讨论/结论，或补齐缺失章节；不适用于无材料的自由创作、代写数据或纯语言润色。
+version: 1.1.0
 license: MIT
 ---
 
-# 学术论文写作：先证据，后成稿
+# 学术论文写作：完成产物，也保留来源
 
-流水线：**契约 → 材料索引 → 事实卡 → 逐段写作 → 本地渲染成稿 → 失败即拦截的审计 → 交付**。
-v2 的关键变化：入口脚本真的渲染 `manuscript.md`；`audit` 对未登记占位、未登记冲突、无来源数字、悬空引用直接 FAIL；
-不再只是"给模板让模型自己保证"。
+把"写一篇论文"拆成 **材料索引 → 章节契约 → 逐段写作（每句可回溯）→ 机器审计 → 可编辑交付**。
+核心主张：稿件里的每个数字、单位、样本量、图注编号、引用都必须指回材料；指不回去的，
+只能删掉、降级为一般性陈述，或明确写进"待人工确认"。
 
 ## 何时使用
 
-触发：给出研究材料并要求论文的某个章节/整篇初稿、结果段 + 图注、按期刊模板补齐章节、
-把表格/图/实验记录写成正文、核对稿件数字与引用。
+触发：用户给出研究材料（csv/xlsx/docx/pdf/图片/实验记录/参考文献）并要求产出论文的某个章节
+或整篇初稿，或要求"按期刊模板补齐章节"、"把结果写成正文"、"结果段 + 图注"。
 
-不触发：没有任何材料却要求生成研究结论；纯语言润色；纯文献检索。遇到这类请求先说明缺什么，
-再按"blocked"降级，**不要用领域常识补实验数据**。
+不触发：没有任何材料、要求凭空生成研究结论；纯语言润色（改用 polish 类 Skill）；
+纯文献检索。遇到这类请求，先说明缺少什么材料再决定是否降级执行。
 
-## 输入与路径
+## 输入
 
-平台会把 Skill 装在 `/skills/weekly-skill`，工作目录 `/app`，输入 `/input`，输出 `/app/output`。
-本文件中的命令均使用相对路径 `scripts/...`，在 `/app` 下执行。
+`/input/case.json`（回退 `./case.json`、`/app/input/case.json`）与同目录 `task.md`；材料由题面提供，
+也可能以 `materials: [{"path","content"}]` 内联在 case.json 里。字段名不固定，**不要凭标签猜内容**，
+先跑 `init` 做宽松识别，再确认体裁、受众、语言与字数/格式约束。
 
-输入来源按优先级：
+`output_contract` 支持三种写法并统一归一化为字段名列表：
+`["paper","source_map"]`、`{"fields": [...]}`、`{"paper": "string", ...}`。
 
-1. `--case` 指定的 `case.json`（默认依次尝试 `/input/case.json`、`./case.json`、`/app/input/case.json`）；
-2. `case.json` 同目录的 `task.md`（只用于发现章节与约束，**不作为数字来源**）；
-3. 材料目录：`case.json` 的 `materials` 字段，或同目录 `materials/ input/ data/ attachments/ supplementary/`；
-4. 运行时内嵌输入：`case.json` 的 `source_text`/`input_text` 字段，或 `materials: [{name, content}]`。
-   `init`/`index` 会把它落盘到 `work/inline/` 再索引，禁止跳过。
-
-`case.json` 字段名不固定；`init` 会做宽松识别并把原始键写到 `work/contract.json` 的 `raw_keys`。
-题面若给出 `output_contract`，**字段一个都不能少**；缺失时按本文件末尾默认契约补齐。
-
-## 产物
-
-| 文件 | 作用 |
-|-|-|
-| `work/contract.json` | case_id、任务原文、题面契约、默认契约、材料发现结果 |
-| `work/section_template.json` | 章节模板（从 case 任务识别；未识别时给 advisory IMRaD） |
-| `work/evidence.json` / `corpus.txt` | 材料清单、sha1、可读性、统一文本 |
-| `work/facts.json` | 自动抽取的**候选**事实（值/单位/文件/行号/上下文），供建 source_map 用 |
-| `work/references.auto.json` | 从 `.bib` 解析出的候选文献条目 |
-| `work/draft.json` | 你写的唯一结构化稿：章节、图注、文献、来源映射、待核项 |
-| `work/manuscript.md` | 脚本渲染出的可编辑成稿（不是模板段） |
-| `work/source_map.json/.csv` | 事实—来源映射（人可核对） |
-| `work/audit.json` | 审计结果：verdict / problems / conflicts / todo |
-| `work/todo.md` | 待补、待核、冲突清单 |
-| `work/claims.json` | 数字/引用守恒检查（verify） |
-| `/app/output/result.json` | 平台输出契约 |
-| `/app/output/manuscript.md` | 主产物（与 `artifact_path` 一致） |
-
-## 执行流程（按顺序，命令与脚本一致）
+## 执行流程
 
 ```bash
-# 1) 契约 + 章节模板 + 内嵌输入落盘
-python scripts/kernel.py init --case /input/case.json --out work
-
-# 2) 索引材料（无 --materials 时自动发现；也可显式传目录/文件）
-python scripts/kernel.py index --case /input/case.json --out work
-# 或：python scripts/kernel.py index --materials /input/materials --out work
-
-# 3) 读 work/facts.json、work/references.auto.json、corpus.txt，写 work/draft.json
-#    这是唯一需要模型写内容的一步；格式见下节。没有证据的句子不要写。
-
-# 4) 渲染成稿 + 来源映射 + 待核清单
-python scripts/kernel.py build --draft work/draft.json --out work
-
-# 5) 离线审计（FAIL 必须修，不能靠改 status 绕过）
-python scripts/section_audit.py \
-  --draft work/manuscript.md \
-  --map work/source_map.json \
-  --template work/section_template.json \
-  --corpus work/corpus.txt \
-  --plan work/draft.json \
-  --references work/references.json work/references.auto.json \
-  --todo work/todo.md \
-  --out work/audit.json
-
-# 6) 数字/引用守恒（辅助定位，不替代 audit）
-python scripts/kernel.py verify \
-  --text work/manuscript.md --evidence-dir work --plan work/draft.json --out work
-
-# 7) 组装输出契约并复制产物
-python scripts/kernel.py emit \
-  --draft work/draft.json --contract-dir work --work-dir work \
-  --audit work/audit.json --source-map work/source_map.json \
-  --out /app/output
-
-# 8) 严格交付门禁（失败则根据报错回到 3/5）
-python scripts/kernel.py check --out /app/output --contract-dir work
+SKILL_DIR=/skills/weekly-skill          # 绝对路径；任意 cwd 均可运行
+mkdir -p /app/work
 ```
 
-`--references` 允许传入不存在的文件（自动跳过）；如果你自己整理了 `work/references.json`，一并传入。
+1. **契约**：`python3 "$SKILL_DIR/scripts/kernel.py" init --case /input/case.json --out /app/work`
+   → `contract.json`（case_id、contract_fields、任务原文、task.md 文本、材料声明）。
+2. **证据索引**：`python3 "$SKILL_DIR/scripts/kernel.py" index --out /app/work`
+   自动使用 case.json 的 materials / 内联 content，缺省时找 `materials/ input/ data/ resources/`；
+   也可显式 `--materials <路径...>`。
+   → `evidence.json`（文件清单、字符数、sha1、可读性）+ `corpus.txt`（统一文本）。
+   docx/xlsx/pdf 内置抽取；扫描版 PDF 抽不出文字标 `[unreadable:`，**不得凭领域常识补内容**。
+3. **材料→事实卡**：为每个可引用事实建一条 `source_map` 记录：
+   `{"claim","value","unit","source_path","locator"}`。冲突（同一指标两处数值不同）**两边都保留**
+   并写进 `uncertainty`，不擅自选一个。
+4. **章节契约**：按 task.md/学科模板写 `work/section_template.json`（章节名、min_words、
+   必须包含的声明字段）。模板缺项要显式补 `missing: true`，不要静默省略。
+5. **逐段写作**：输出 `work/draft.json`（schema 见 `references/output-contract.md`）：
+   每个段落先列"本段要用的事实卡编号"，再写句子；含事实的句子登记 `source_map`。
+   没有事实卡支撑的内容只能写成方法性或过渡性表述，且不得出现具体数值。
+6. **渲染**：`python3 "$SKILL_DIR/scripts/kernel.py" build --draft /app/work/draft.json --out /app/work`
+   → `manuscript.md`（可编辑正文，章节/图表题注/参考文献由 plan 渲染）。
+7. **审计**：
+   `python3 "$SKILL_DIR/scripts/section_audit.py" --draft /app/work/manuscript.md --map /app/work/source_map.json --template /app/work/section_template.json --corpus /app/work/corpus.txt --plan /app/work/draft.json --out /app/work/audit.json`
+   `verdict=fail` 只用于**证据造假**（数字在材料中查无此值、引用无法解析、source_map 指向不存在的
+   文件）；章节偏短、缺声明、未登记占位符/冲突、图表题注不全只记 warning，不阻断交付。
+8. **数值/引用守恒**：`python3 "$SKILL_DIR/scripts/kernel.py" verify --text /app/work/manuscript.md --evidence-dir /app/work --out /app/work`
+   → `claims.json`；`unsupported_numbers` 与 `citations_not_in_sources` 为 0 才可交付。
+   数字按**数值相等**比较（`12.40` = `12.4`，带 `%` 不影响），不做子串匹配。
+9. **产出**：`python3 "$SKILL_DIR/scripts/kernel.py" emit --draft /app/work/draft.json --contract-dir /app/work --work-dir /app/work --out /app/output`
+   写 `result.json`，并落盘 `manuscript.md`、`source_map.json`、`audit.json`、`claims.json`。
+   契约字段缺失时自动补 `null`、`status=partial` 并在 `limits` 说明，退出码 1（不谎报成功）。
+10. **自查**：`python3 "$SKILL_DIR/scripts/kernel.py" check --out /app/output --contract-dir /app/work`
+    校验契约字段、产物存在且非空、source_map 结构、status/limits 一致；必须 PASS。
 
-## `work/draft.json` 格式
+## 写作规则（按评分维度对齐）
 
-```json
-{
-  "case_id": "string",
-  "status": "ok|partial|blocked|refused",
-  "language": "en|zh",
-  "title": "可选标题",
-  "reference_style": "numbered|author-year",
-  "sections": [
-    {"heading": "Results", "level": 2, "paragraphs": [
-      {"text": "正文……（Figure 1）……", "fact_ids": ["C0003"]},
-      {"text": "此处缺处理组数值。", "placeholder": "treated degradation value"}
-    ]}
-  ],
-  "figures": [
-    {"label": "Figure 1", "caption": "图注正文。", "section": "Results",
-     "source_path": "/input/materials/fig1.png", "locator": "whole image"}
-  ],
-  "tables": [],
-  "references": [
-    {"key": "smith2020", "authors": "Smith, Jane and Lee, Wei", "year": "2020",
-     "title": "……", "venue": "Journal of Catalysis", "volume": "382",
-     "pages": "45-53", "doi": "10.1016/j.jcat.2020.01.001"}
-  ],
-  "declarations": {
-    "data_availability": "……", "funding": "……",
-    "conflict_of_interest": "……", "ethics": "……"
-  },
-  "source_map": [
-    {"claim": "treated degradation", "metric": "treated degradation", "value": "21.7",
-     "source_path": "/input/materials/exp.csv", "locator": "row 3, col degradation_pct",
-     "fact_id": "C0007"}
-  ],
-  "changes": [{"target": "Results", "type": "created", "before": "", "after": "……", "reason": "……"}],
-  "uncertainty": [
-    {"id": "U01", "type": "missing_material|unverifiable|conflict|missing_citation|ambiguous_instruction",
-     "where": "Results paragraph 1", "what": "treated degradation value",
-     "why": "exp.csv row 3 is empty", "next_step": "作者补数或确认未采集"}
-  ],
-  "conflicts": [
-    {"where": "exp.csv row 3 / notes.md line 1", "what": "treated degradation",
-     "values": ["18.2", "21.7"], "sources": ["..."], "why": "两份材料不一致"}
-  ],
-  "limits": "status=partial 时必填"
-}
-```
-
-规则：
-
-- `source_map` 必须覆盖正文中每个数字、单位、样本量、p 值、温度/剂量；同一 `claim`/`metric` 出现不同值即为冲突。
-- `fact_ids` 可选，但建议填 `work/facts.json` 的 `candidate_id`，便于回查。
-- 图注必须写成 `Figure 1. ...` / `Table 1. ...`（中文 `图 1.` / `表 1.`），正文必须出现 `Figure 1` 引用；
-  `figures[].section` 决定图注放在哪一节之后。
-- 文献：每条至少 authors/year/title/venue；有 DOI 才写 DOI，**没有就留空并在 limits 或 uncertainty 说明未核验**。
-  不允许凭记忆补文献；材料里没有的引用，要么不引，要么写 `【待补：reference for ...】` 并登记 `missing_citation`。
-- 缺数据：正文写 `【待补：<what>｜<why>】`，并在 `uncertainty` 写一条 `what` 或 `where` 能对上的记录。
-- 冲突：正文保留两个值并写 `【待核：<what> <A> vs <B>】`，`uncertainty` 写 `type=conflict`，同时填 `conflicts`。
-- 不要用"约/大概/可能"掩盖缺失数字；不要在 `limits` 为空时声明 `partial`。
-
-## 审计门禁（`section_audit.py`）
-
-| 检查 | FAIL（必须修） | WARN（review） |
-|-|-|-|
-| 章节 | 模板 required 章节缺失、顺序错 | advisory 章节缺失、字数不足 |
-| 数字 | 正文数字无法在 source_map 或 corpus 中找到，且未被 uncertainty 覆盖 | 只被 uncertainty 覆盖 |
-| 引用 | 编号/`\cite{}`/作者-年份无法在文献表、bib 或材料原文中解析 | — |
-| 文献 | 结构化条目缺 authors/year/title/venue | 缺 DOI（标记未核验，不补造）、条目未被引用 |
-| 图表 | 正文引用 `Figure N` 但无图注；模板图中的 label 无图注 | 图注未被正文引用 |
-| 占位 | `【待补/待核：…】` 没有对应 uncertainty 记录 | — |
-| 冲突 | source_map 同一 metric 多值但未登记 conflict | 材料中发现疑似冲突候选（待人核） |
-| 声明 | 模板要求的 data availability/funding/COI/ethics 缺失 | — |
-| 绝对化 | — | "证明/显著优于/proves" 附近无引用 |
-
-`verdict=fail` 时 `emit` 会把 status 降为 `partial` 并写清 limits；**不要手工改回 ok**。
-`emit` 遇到题面契约字段缺失会返回非零，`check` 会再次拦截。
-
-## 输出契约（`result.json`）
-
-题面 `output_contract` 优先；未提供时使用以下默认字段：
-
-| 字段 | 类型 | 说明 |
-|-|-|-|
-| case_id | string | 原样回填 |
-| status | enum | ok / partial / blocked / refused |
-| artifact_path | string | 主产物相对路径，默认 `manuscript.md` |
-| artifact_format | string | md/tex/docx |
-| source_map | array | `[{claim,value,source_path,locator}]`，partial 时也保留已有映射 |
-| changes | array | `[{target,type,before,after,reason}]` |
-| uncertainty | array | 缺材料/不可核验/冲突等，无则 `[]` |
-| limits | string | partial/blocked 时必填 |
-| self_check | object | 至少含 `audit_verdict` 与各类计数 |
-| conflicts | array | 已保留并登记的矛盾值 |
-| todo | array | 待补/待核清单 |
-| references | array | 文献条目 |
-| figures / tables | array | 图表 label、caption、来源 |
-
-## 失败与降级
-
-| 情况 | 动作 |
+| 维度 | 规则 |
 |-|-|
-| 找不到 `case.json` | `init` 返回 1；写 `status=blocked`、`limits="case.json not found"`，不要猜任务 |
-| 材料目录为空 | `index` 返回 1；检查 `--materials` 或 `source_text`；`status=blocked` |
-| PDF 无文本层 | `evidence.json.unreadable` 记录；只引用可读文本，图像内容标记 `unverifiable` |
-| CSV 单元格为空 | `【待补：…】` + `uncertainty type=missing_material`，不得估算 |
-| 两份材料数字冲突 | 保留两值 + `conflicts` + `uncertainty type=conflict`，不下结论 |
-| 文献信息不全 | 只写已有字段；缺 DOI 标记未核验；不得生成 DOI |
-| 任务要求超出材料 | 在 `limits` 说明；`status=partial`，不要虚构实验 |
+| 写得实 | 结果段只描述材料里有的数值与趋势；不把相关写成因果，不补做未做的实验 |
+| 引得对 | 每条引用必须支撑它所在的句子；作者/年份/DOI 只能来自材料，缺就标 `missing_citation` |
+| 全得起来 | 按模板检查章节、图表、参考文献、数据可得性声明；缺项写 `missing: true` 并在正文标注 |
+| 改得动 | 使用 Markdown 标题层级；图注用 `Figure N.` / `图 N`；不把正文压成一段 |
 
-## 最小调用示例（合成，非官方案例）
+句式约束：方法段用过去时被动/主动均可但全篇统一；结果段避免 `significant` 除非材料给了检验
+结果与 p 值；讨论段区分"本研究观察到"与"文献报告"。
 
-```text
-/input/case.json          {"case_id":"demo","task":"Write Results","materials":["materials"]}
-materials/exp.csv         group,n,degradation_pct\ncontrol,30,12.4\ntreated,30,21.7
-materials/refs.bib        @article{smith2020,...}
+## 硬性禁止
+
+- 不新增材料外的数字、样本量、p 值、图表或参考文献。
+- 不伪造"已运行实验/已统计分析/已获得伦理批准"等状态。
+- 不把缺失章节写成占位符号而不说明；不提交预制答案。
+- 不使用模型记忆里的具体文献条目充数。
+
+## 输出
+
+`/app/output/result.json` + `manuscript.md` + `source_map.json` + `audit.json`；
+未完成部分在 `limits` 说明，无法确认项进 `uncertainty`。契约见 `references/output-contract.md`。
+
+## 异常与降级
+
+| 情况 | 处理 |
+|-|-|
+| case.json 缺失/非法 JSON | `init` 退出 1，写 `contract.json` 标 blocked；不猜任务 |
+| 无材料文件 | `index` 退出 1 并说明缺什么；不生成无来源正文 |
+| 材料缺失/不可读 | `status: partial` 或 `blocked`，列出缺哪个文件、影响哪一章 |
+| 数据与图注冲突 | 保留两值，标 `conflict`，正文中立表述 + 待核清单 |
+| 契约字段无法产出 | 补 `null` + `status=partial` + `limits`，`emit` 退出 1 |
+| 材料超长 | 先按章节建索引，只抽取与本章相关的事实卡 |
+| 无法判断 | 写 `uncertainty`，不猜 |
+
+## 文件说明
+
+- `scripts/kernel.py`：契约识别、材料抽取/内联、渲染、数值/引用守恒、产出与自查（仅标准库）。
+- `scripts/section_audit.py`：章节完整性 + 数值绑定 + 证据审计。
+- `references/output-contract.md`：默认输出字段与 draft.json schema；题面契约优先。
+- `references/section-template.md`：常见学科章节模板与最低要素。
+- `references/example.md`：示意输入/输出（示例，非正式案例答案）。
+
+## 最小调用示例
+
+```bash
+SKILL_DIR=/skills/weekly-skill
+python3 "$SKILL_DIR/scripts/kernel.py" init --case /input/case.json --out /app/work
+python3 "$SKILL_DIR/scripts/kernel.py" index --out /app/work
+python3 "$SKILL_DIR/scripts/kernel.py" build --draft /app/work/draft.json --out /app/work
+python3 "$SKILL_DIR/scripts/section_audit.py" --draft /app/work/manuscript.md \
+  --map /app/work/source_map.json --corpus /app/work/corpus.txt --out /app/work/audit.json
+python3 "$SKILL_DIR/scripts/kernel.py" emit --draft /app/work/draft.json \
+  --contract-dir /app/work --work-dir /app/work --out /app/output
+python3 "$SKILL_DIR/scripts/kernel.py" check --out /app/output --contract-dir /app/work
 ```
 
-`work/draft.json` 写一个 Results 段 + 两个 source_map 条目 + 一条文献；
-依次执行上节 1–8 步，应得到：
+## 改动记录
 
-- `work/manuscript.md`：`## Results`、正文含 `12.4`/`21.7`、`## References`；
-- `work/audit.json`：`verdict=pass`（或仅 DOI/字数类 warning）；
-- `/app/output/result.json`：契约字段齐全，`check` 输出 `PASS`。
+### 1.1.0（以 05_skills 为基线；05_skills_v2 仅吸收经实测确认的改动）
 
-## 已知边界
+比较结论（合成夹具实跑，见 `07_submissions/iter_1.1.0_report.md`）：
 
-- 审计是离线的：不联网核对 DOI/作者，只做"能否在材料/文献表中解析"的检查；DOI 真实性仍需人工。
-- 抽取质量取决于源文件：扫描 PDF、无表头的 CSV、合并单元格的 xlsx 可能只得到部分数值，需在 `limits` 说明。
-- 不判断学科结论是否成立，只保证"写出来的每个事实都能回到材料，回不去的被显式标出"。
+- **吸收** v2 的数字数值比较：v1 用字面子串判断（`n not in corpus`），draft 写 `12.45%`
+  而材料是 `12.45` 时被误报 1 条（假阳性），也无法区分 `12.4%` 与 `12.45%`；
+  v3 按数值相等比较并忽略 `%`，实测 A 夹具 `[]`、B 夹具 `["12.4%"]`（与 v2 一致）。
+- **吸收** v2 的可读性判定：v1 以 `text.startswith("[")` 判 unreadable，材料以 `[` 开头即被误判；
+  v3 用 `[unreadable:` 前缀，实测 C 夹具未读文件从 1 个降为 0。
+- **吸收** v2 的自动材料发现、内联材料、`build` 渲染、`manuscript.md` 兜底、契约字段缺失返回非 0，
+  以及 v3 延续的按章节自身正文计算字数（实测 D 夹具 Introduction=96）。
+- **吸收** v2 的审计驱动状态：v1 `emit` 直接沿用 draft 的 `status=ok`，即使 separate verify 已判
+  `review`；v3 在 audit fail 时把状态降为 `partial` 并在 `limits` 写明不可回溯的数字（实测 B 夹具）。
+- **不吸收** v2 的 fail-closed 审计：v2 把缺声明、未登记占位符/冲突、图表题注不全、
+  章节顺序变化都归入 `problems` 并判 fail（实测缺 `data_availability` 时 `verdict=fail`、rc=1）；
+  v3 只把**证据造假**判 fail，其余记 warning（同一夹具 `verdict=review`、rc=0）。
+- **不吸收** v2 的列表契约处理：`output_contract` 为列表时 v2 `emit` 输出
+  `missing_contract_fields=['fields']`、`check` 返回 1（内容完整也被判失败）；v3 统一归一化三种写法。
+- v2 的 `index` 在 case.json 显式给出 materials 时仍追加基础目录，同一文件被索引两次
+  （实测 3 个文件记 6 条）；v3 按 realpath 去重。
+- v3 不声称任何正式案例分数；仅报告本地夹具与 validator 结果。

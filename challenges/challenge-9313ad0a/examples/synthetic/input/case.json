@@ -1,0 +1,13 @@
+{
+ "case_id": "syn-mindmap-demo",
+ "output_contract": {
+  "mindmap": "object",
+  "nodes": "array",
+  "edges": "array",
+  "evidence_index": "object",
+  "status": "string",
+  "sources": "array",
+  "uncertainty": "array",
+  "change_log": "array"
+ }
+}

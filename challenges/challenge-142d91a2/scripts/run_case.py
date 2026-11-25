@@ -88,7 +88,10 @@ def main(argv=None):
         except Exception:  # noqa: BLE001
             pass
         return 1
-    return 0 if result.get("status") in ("success", "partial") else 1
+    # status=failed 表示"材料不可读、内容未产出"，但 result.json 与逐文件原因已如实写全，
+    # 属于约定内的降级交付；Harbor 以退出码判断是否崩溃，故仍返回 0（旧版返回 1）。
+    return 0 if report.get("ok") or result.get("status") in ("success", "partial", "failed") else 1
+
 
 
 if __name__ == "__main__":

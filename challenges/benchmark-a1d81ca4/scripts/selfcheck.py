@@ -172,8 +172,12 @@ def main():
     blob = json.dumps(result, ensure_ascii=False).lower()
     found = [p for p in PLACEHOLDERS if p in blob]
     check("no_placeholders", not found, "found: %s" % found)
-    check("contract_fields_present", bool(result.get("contract_fields")),
-          "result.contract_fields empty")
+    declared = run_bench.contract_field_names(case)
+    if declared:
+        check("contract_fields_present", bool(result.get("contract_fields")),
+              "result.contract_fields empty")
+        missing = [name for name in declared if name not in result]
+        check("contract_fields_top_level", not missing, "not at result top level: %s" % missing)
     check("uncertainty_is_list", isinstance(result.get("uncertainty"), list),
           "uncertainty must be a list")
     check("status_honest", result.get("status") in ("success", "partial", "failed"),

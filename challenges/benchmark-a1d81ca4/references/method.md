@@ -39,8 +39,8 @@
 ## 6. 复现步骤
 
 ```bash
-python3 scripts/run_bench.py --input examples/synthetic --out /tmp/out --work /tmp/work
-python3 scripts/selfcheck.py --input examples/synthetic --out /tmp/out --work /tmp/work
+python3 "$SKILL_DIR/scripts/run_bench.py" --input "$SKILL_DIR/examples/synthetic" --out /tmp/out --work /tmp/work
+python3 "$SKILL_DIR/scripts/selfcheck.py" --input "$SKILL_DIR/examples/synthetic" --out /tmp/out --work /tmp/work
 ```
 
 两次运行 `dataset_sha256` 相同；`selfcheck.py` 会重建一次并断言一致。合成示例仅演示接口，不是正式案例结果。

@@ -64,7 +64,7 @@ def render_pdf(docx_path, out_pdf, timeout=180):
         os.makedirs(os.path.dirname(os.path.abspath(out_pdf)) or ".", exist_ok=True)
         shutil.copyfile(produced, out_pdf)
         return {"status": "rendered", "reason": "", "renderer": bin_,
-                "pdf": os.path.abspath(out_pdf), "pages": pages}
+                "pdf": os.path.basename(out_pdf), "pages": pages}
     except subprocess.TimeoutExpired:
         return {"status": "unavailable", "reason": "LibreOffice 转换超时(%ss)" % timeout,
                 "renderer": bin_, "pdf": None, "pages": 0}

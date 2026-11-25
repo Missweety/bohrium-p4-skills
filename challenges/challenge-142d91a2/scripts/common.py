@@ -15,7 +15,7 @@ import re
 import unicodedata
 
 SKILL_NAME = "research-proposal-plan"
-SKILL_VERSION = "2.0.0"
+SKILL_VERSION = "3.0.0"
 ANCHOR_HELP = "S1#p1.3 = 文件 S1 第 1 页第 3 段；case.json:<key> = 案例字段；无分页材料统一写作 p1"
 
 _TYPO_MAP = {
@@ -92,12 +92,40 @@ def write_json(path, obj):
     return path
 
 
-def read_text(path, limit=None):
+def read_text_meta(path, limit=None):
+    """Return (text, meta) with an explicit encoding fallback.
+
+    utf-8 (with BOM) -> gb18030 -> utf-16; the chosen encoding is reported so
+    callers can disclose a fallback instead of silently producing mojibake.
+    """
+    meta = {"encoding": None, "fallback": False, "lossy": False, "error": None}
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read() if limit is None else fh.read(limit)
-    except OSError:
-        return ""
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        meta["error"] = "%s: %s" % (type(exc).__name__, exc)
+        return "", meta
+    if limit is not None:
+        raw = raw[:limit]
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates = ("utf-16",)
+    else:
+        candidates = ("utf-8-sig", "gb18030")
+    for enc in candidates:
+        try:
+            text = raw.decode(enc)
+            meta["encoding"] = enc
+            meta["fallback"] = enc != "utf-8-sig"
+            return text, meta
+        except UnicodeDecodeError:
+            continue
+    text = raw.decode("utf-8", "replace")
+    meta.update({"encoding": "utf-8(replace)", "fallback": True, "lossy": True})
+    return text, meta
+
+
+def read_text(path, limit=None):
+    return read_text_meta(path, limit)[0]
 
 
 def flatten_contract(contract):

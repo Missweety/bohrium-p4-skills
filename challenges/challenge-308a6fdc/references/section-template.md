@@ -1,53 +1,31 @@
-# 章节模板与审计口径
+# 学科章节模板与最低要素
 
-`kernel.py init` 会生成 `work/section_template.json`。优先级：
+按 task.md 指定的学科/期刊调整；题面没指定时用下面两套之一，并在 `work/section_template.json`
+里显式写出实际使用的章节与最低字数。
 
-1. `case.json` 的 `task` / `instruction` 中明确点名的章节 → `source=task_detected`，`required=true`；
-2. 只有 `task.md` 泛泛列出章节时 → `source=task_md_advisory`，全部 `required=false`，
-   按真实指令把需要的章节改成 `required=true`；
-3. 都没识别到 → `source=skill_default_advisory` 的 IMRaD 骨架，全部 advisory。
+## A. IMRaD 研究论文
 
-## 格式
+| 章节 | 最低要素 | 常见错误 |
+|-|-|-|
+| Abstract | 背景 1 句、方法 1–2 句、主要结果（含关键数值）、结论 1 句、意义 1 句 | 出现正文没有的数字；写"显著"但无检验 |
+| Introduction | 领域现状（有引用）、已知缺口、本研究问题、方法与贡献概览 | 只堆综述无缺口；引用与论断不对应 |
+| Methods | 材料/样本、仪器与试剂（型号/厂商/版本）、实验步骤、统计方法与软件版本、伦理/合规声明 | 缺样本量、缺统计方法、步骤无法复现 |
+| Results | 按图表顺序叙述、每段一个主要发现、报告 n / 均值 / 误差 / 检验统计量 / p 值、图注自洽 | 把趋势写成因果；正文与图注数字不一致 |
+| Discussion | 主要发现回述、与文献比较（有引用）、机制解释（标推测）、局限、结论与展望 | 引入未报告的新结果；把局限写成套话 |
+| Data availability | 数据/代码获取方式或"可向作者索取" | 缺失 |
 
-```json
-{
-  "source": "task_detected",
-  "genre": "journal article",
-  "sections": [
-    {"name": "Abstract", "canonical": "Abstract",
-     "aliases": ["Abstract", "摘要"], "min_words": 80, "required": true},
-    {"name": "Results", "canonical": "Results",
-     "aliases": ["Results", "结果"], "min_words": 120, "required": true}
-  ],
-  "declarations": ["data_availability"],
-  "require_references": true,
-  "require_doi": false
-}
-```
+## B. 学位论文/长文档
 
-- `name`：稿件中使用的标题；`aliases`：审计匹配用，大小写不敏感；
-- 一级标题（`# Title`）不参与章节匹配，避免论文题目里的 "results" 被误认成章节；
-- `required=true` 的章节缺失 → FAIL；`min_words` 不足 → WARN（review）；
-- 章节顺序按模板数组，实际出现顺序倒置 → FAIL；
-- `declarations` 支持 `data_availability`、`funding`、`conflict_of_interest`、`ethics`，
-  缺失 → FAIL；
-- `require_references` / `require_doi` 为提示位；当前审计对每条文献检查 authors/year/title/venue 与 DOI，
-  缺 DOI 只 WARN 并明确"未核验"，不生成 DOI。
+摘要（中英）→ 绪论（研究背景/意义/现状/内容与技术路线）→ 理论基础 → 方法 → 实验与结果
+→ 讨论 → 结论与展望 → 参考文献 → 附录 → 致谢。每章开头写本章小结式导语。
 
-## 图表
+## 图表与引用
 
-- 图注行格式：`Figure 1. ...`、`Fig. 1. ...`、`Table 1. ...`、`图 1. ...`、`表 1. ...`（中英文冒号均可）；
-- 正文必须出现同编号引用（`Figure 1` / `图 1`），否则 WARN "caption never cited"；
-- 正文引用但无图注 → FAIL；
-- `draft.json` 的 `figures[].label` 必须能在成稿中找到对应图注，否则 FAIL；
-- 图注位置由 `figures[].section` 决定；未指定时放在首次引用它的章节之后。
+- 图注格式：`Figure 3. 标题. （说明符号/误差线/n）`；正文首次引用写 `(Figure 3)` / `图 3`。
+- 表注在表上方；表内单位写在表头，不写在每个单元格。
+- 引用：正文编号 `[12]` 或作者-年份，全篇统一；参考文献条目字段完整（作者、年份、题名、刊名、卷期、页码、DOI）。
 
-## 数字与引用
+## 缺项处理
 
-- 正文数字（含 `%`、单位、样本量、p 值）必须命中 `source_map.value` 或 `corpus.txt`，按数字边界匹配：
-  `12.4` 不会被 `12.45` 满足；`12.4%` 与 `12.4` 视为同一值；
-- 参考文献章节之前的正文才参与数字/引用检查，文献表自身不参与；
-- 编号引用 `[1]`/`[1,3-5]` 必须能在文献表找到对应编号；
-- `\cite{key}` 必须命中 bib key；
-- 作者-年份 `(Smith et al., 2020)` 必须能在文献表、结构化 references 或材料原文中找到姓氏+年份；
-- 找不到 → FAIL；没有文献信息时不要从记忆补，写 `【待补：reference ...】` 并登记 `missing_citation`。
+模板要求的章节/字段若材料不足以支撑：保留标题，正文写"材料未提供 X，待补充"，并在
+`section_template.json` 记 `missing: true`。不得用通用套话冒充已完成内容。

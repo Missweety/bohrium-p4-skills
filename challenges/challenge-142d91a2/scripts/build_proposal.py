@@ -1528,6 +1528,9 @@ def build_alignment(plan):
     questions = plan.get("questions", [])
     rows = []
     gaps = []
+    blocked_gaps = []
+    no_period = (plan.get("constraints", {}).get("period_months") or {}).get("status") != "reported"
+    no_route = not steps or not any(t.get("linked_questions") for t in steps)
     if not (1 <= len(questions) <= 3):
         gaps.append("研究问题数量为 %d，题面要求收敛为 1–3 个" % len(questions))
     for question in questions:
@@ -1551,9 +1554,23 @@ def build_alignment(plan):
             missing.append("route_step")
         if not milestone_ids:
             missing.append("milestone")
+        blocked = []
+        for name in missing:
+            # 缺口归因：是材料没给，还是生成本身漏了。
+            # 只有"材料没给"的缺口才降级为 warning，生成漏项仍是硬问题。
+            if name == "route_step" and no_route:
+                blocked.append("材料未给出可识别的研究方法，无法生成可链接的路线步骤")
+            elif name == "milestone" and not milestones and no_period:
+                blocked.append("材料未给出研究周期，无法排里程碑")
+            elif name == "outcome" and not outcomes:
+                blocked.append("材料未给出预期成果")
         if missing:
             row["missing"] = missing
-            gaps.append("%s 缺少 %s" % (qid, ",".join(missing)))
+            text = "%s 缺少 %s" % (qid, ",".join(missing))
+            gaps.append(text)
+            if blocked and len(blocked) == len(missing):
+                row["blocked_by"] = sorted(set(blocked))
+                blocked_gaps.append(text)
         rows.append(row)
     # A milestone chain must be closed: dependencies point to earlier phases and
     # the last phase must end inside the declared period.
@@ -1566,7 +1583,7 @@ def build_alignment(plan):
         if milestones[-1].get("end_month") != int(round(float(total))):
             gaps.append("里程碑末月 %s 与周期 %s 个月不一致"
                         % (milestones[-1].get("end_month"), total))
-    return {"rows": rows, "gaps": gaps,
+    return {"rows": rows, "gaps": gaps, "blocked_gaps": blocked_gaps,
             "question_count": len(questions),
             "status": "pass" if not gaps else "partial"}
 
@@ -1816,8 +1833,12 @@ def determine_status(bundle, plan, feasibility, alignment, missing_listed,
     if alignment.get("status") != "pass":
         reasons.append("alignment gaps")
     status = "partial" if reasons else "success"
-    if readable == 0 and not bundle.get("sources"):
-        status = "partial"
+    if readable == 0:
+        # 与 SKILL.md 一致：没有任何可读的科研材料时状态必须是 failed，
+        # 不能把只有 task.md 的空壳方案标成 partial（旧版在此恒返回 partial）。
+        status = "failed"
+        if not reasons:
+            reasons.append("no readable scientific material")
     return status, elements, reasons
 
 
@@ -2052,18 +2073,22 @@ def render_markdown(plan, claims, elements, feasibility, alignment,
     lines.append("### 6.1 伦理与合规安排")
     ethics_items = (plan.get("constraints", {}).get("ethics") or {}).get("items") or []
     data_items = (plan.get("constraints", {}).get("data") or {}).get("items") or []
+    # 约束条目的正文键是 quote（text 不存在）；旧版取 item["text"] 直接渲染成 "—"
     if ethics_items:
         for item in ethics_items:
             lines.append("- **审批/知情同意**：%s（`%s` %s）"
-                         % (md_cell(item.get("text"), 260), item.get("anchor"),
-                            item.get("file", "")))
+                         % (md_cell(item.get("quote") or item.get("text")
+                                    or "（材料未给出具体表述）", 260),
+                            item.get("anchor"), item.get("file", "")))
     else:
         lines.append("- **审批/知情同意**：材料未提供伦理审批号或知情同意安排，"
                      "需在方案细化阶段补齐；未补齐前不得启动涉人步骤。")
     if data_items:
+        first = data_items[0]
         lines.append("- **数据安全**：%s（`%s` %s）"
-                     % (md_cell(data_items[0].get("text"), 260),
-                        data_items[0].get("anchor"), data_items[0].get("file", "")))
+                     % (md_cell(first.get("quote") or first.get("text")
+                                or "（材料未给出具体表述）", 260),
+                        first.get("anchor"), first.get("file", "")))
     else:
         lines.append("- **数据安全**：材料未提供数据脱敏、存储与访问控制安排，需补充。")
     lines.append("- **利益冲突与风险处置**：材料未提供利益冲突声明；随访发现高风险个体时"
@@ -2131,9 +2156,11 @@ def render_markdown(plan, claims, elements, feasibility, alignment,
                         docx_check.get("tables"), docx_check.get("bytes")))
     lines.append("")
     lines.append("```bash")
-    lines.append("python3 scripts/run_case.py --input /input --work /app/work --output /app/output")
-    lines.append("python3 scripts/selfcheck.py --case /input/case.json \\")
-    lines.append("    --sources /app/work/sources.json --out /app/output")
+    lines.append('SKILL_DIR=/skills/weekly-skill   # 任意 cwd 均可执行')
+    lines.append('python3 "$SKILL_DIR/scripts/run_case.py" --input /input --work /app/work '
+                 '--output /app/output')
+    lines.append('python3 "$SKILL_DIR/scripts/selfcheck.py" --case /input/case.json \\')
+    lines.append('    --sources /app/work/sources.json --out /app/output')
     lines.append("```")
     lines.append("")
     lines.append("---")
@@ -2382,6 +2409,8 @@ def summarize_sources(bundle, input_dir, cited_anchors):
             "readable": bool(src.get("readable")),
             "paragraphs": len(src.get("paragraphs", [])),
             "chars": src.get("chars", 0),
+            "encoding": src.get("encoding"),
+            "encoding_fallback": bool(src.get("encoding_fallback")),
             "sha256": source_file_sha256(path) if os.path.isfile(path) else None,
             "anchors_cited": len(anchors),
             "error": src.get("error"),
@@ -2413,7 +2442,8 @@ def try_render_preview(docx_path, output_dir):
         return {"status": "failed", "reason": str(exc)[:200]}
     pdf_path = os.path.join(output_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
     if proc.returncode == 0 and os.path.isfile(pdf_path) and os.path.getsize(pdf_path) > 0:
-        return {"status": "ok", "pdf": pdf_path, "bytes": os.path.getsize(pdf_path)}
+        return {"status": "ok", "pdf": os.path.basename(pdf_path),
+                "bytes": os.path.getsize(pdf_path)}
     return {"status": "failed",
             "reason": (proc.stderr or proc.stdout or b"").decode("utf-8", "replace")[:200]}
 
@@ -2638,7 +2668,7 @@ def build(input_dir, work_dir, output_dir, plan_path=None, sources_path=None):
         "status": "unavailable", "reason": "DOCX not valid"}
 
     def artifact(path, role, fmt):
-        return {"path": path, "role": role, "format": fmt,
+        return {"path": os.path.basename(path), "role": role, "format": fmt,
                 "exists": os.path.isfile(path),
                 "bytes": os.path.getsize(path) if os.path.isfile(path) else 0}
 
@@ -2649,7 +2679,8 @@ def build(input_dir, work_dir, output_dir, plan_path=None, sources_path=None):
         artifact(csv_path, "evidence ledger", "csv"),
     ]
     if preview.get("status") == "ok":
-        artifacts.append(artifact(preview["pdf"], "rendered PDF preview", "pdf"))
+        artifacts.append(artifact(os.path.join(output_dir, preview["pdf"]),
+                                  "rendered PDF preview", "pdf"))
     summary = " ".join(
         part for part in [
             ("缺口：" + short(plan.get("gap_statement"), 100)) if plan.get("gap_statement") else "",
@@ -2668,9 +2699,9 @@ def build(input_dir, work_dir, output_dir, plan_path=None, sources_path=None):
         "discipline": plan.get("discipline", ""),
         "summary": summary,
         "proposal_md": markdown,
-        "proposal_path": proposal_path,
-        "proposal_docx": docx_path,
-        "proposal_docx_path": docx_path,
+        "proposal_path": os.path.basename(proposal_path),
+        "proposal_docx": os.path.basename(docx_path),
+        "proposal_docx_path": os.path.basename(docx_path),
         "docx_check": docx_check,
         "elements": elements,
         "element_status": elements_status,
@@ -2702,7 +2733,8 @@ def build(input_dir, work_dir, output_dir, plan_path=None, sources_path=None):
             "version": common.SKILL_VERSION,
             "script": "build_proposal.py",
             "plan_source": plan_source,
-            "sources_path": sources_path,
+            "sources_path": os.path.basename(sources_path) if sources_path else None,
+            "sources_dirname": os.path.basename(os.path.dirname(sources_path)) if sources_path else None,
             "plan_path": plan_path or "",
             "missing_listed": missing_listed,
         },

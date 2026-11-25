@@ -36,8 +36,8 @@ import forge  # noqa: E402
 import grade  # noqa: E402
 import ingest  # noqa: E402
 
-DATASET_VERSION = "reading-bench-v2"
-REPORT_VERSION = "reading-report-v2"
+DATASET_VERSION = "reading-bench-v3"
+REPORT_VERSION = "reading-report-v3"
 SPLIT_DEV_BUCKETS = 30          # 30% of source units go to dev, rest to test
 MAX_ANSWER_CHARS = 1200         # public contract: answer budget per item
 
@@ -113,49 +113,79 @@ def build(case, task_text, input_dir, case_id=None):
 
 
 def split_items(items):
-    """Unit-level deterministic split; dev and test never share a source unit."""
-    dev, test = [], []
-    for it in items:
-        bucket = int(hashlib.sha256(it["unit_id"].encode("utf-8")).hexdigest()[:8], 16) % 100
-        (dev if bucket < SPLIT_DEV_BUCKETS else test).append(it)
-    # Guarantee both sides are non-empty and quote-disjoint.
-    if not test:
-        test, dev = dev, []
-    if not dev and len(test) > 1:
-        dev, test = test[:1], test[1:]
+    """Unit-level deterministic split; dev and test never share a source unit.
 
+    Every item of a unit stays on the same side: dropping or leaking an item
+    would silently shrink the held-out set and corrupt the reported score.
+    """
+    by_unit = {}
+    for it in items:
+        by_unit.setdefault(it["unit_id"], []).append(it)
+    dev, test = [], []
+    for unit_id, group in by_unit.items():
+        bucket = int(hashlib.sha256(unit_id.encode("utf-8")).hexdigest()[:8], 16) % 100
+        (dev if bucket < SPLIT_DEV_BUCKETS else test).extend(group)
+    # Guarantee both sides are non-empty without splitting a unit.
+    if not test:
+        test, dev = list(items), []
+    elif not dev and len(by_unit) > 1:
+        first_unit = test[0]["unit_id"]
+        dev = [it for it in test if it["unit_id"] == first_unit]
+        test = [it for it in test if it["unit_id"] != first_unit]
     dev_units = {it["unit_id"] for it in dev}
+    test_units = {it["unit_id"] for it in test}
     dev_quotes = {sha256_text((it["evidence"][0] or {}).get("quote", "")) for it in dev}
-    leaked = [it["item_id"] for it in test
-              if it["unit_id"] in dev_units
-              or sha256_text((it["evidence"][0] or {}).get("quote", "")) in dev_quotes]
-    if leaked:  # defensive: never ship a contaminated split silently
-        dev_units_all = dev_units | {it["unit_id"] for it in test}
-        dev = []
-        dev_quotes = set()
-        leaked = []
-        if len(test) > 1:
-            dev, test = test[:1], test[1:]
-            dev_units = {it["unit_id"] for it in dev}
-            dev_quotes = {sha256_text((it["evidence"][0] or {}).get("quote", "")) for it in dev}
-            leaked = [it["item_id"] for it in test
-                      if it["unit_id"] in dev_units
-                      or sha256_text((it["evidence"][0] or {}).get("quote", "")) in dev_quotes]
-        assert not leaked, "split contamination: %s" % leaked
-        assert not (set(dev_units) & {it["unit_id"] for it in test}) or not dev
+    test_quotes = {sha256_text((it["evidence"][0] or {}).get("quote", "")) for it in test}
     return {
-        "policy": "sha256(unit_id) mod 100 < %d -> dev, else test" % SPLIT_DEV_BUCKETS,
+        "policy": "sha256(unit_id) mod 100 < %d -> dev, else test (whole unit kept together)"
+                  % SPLIT_DEV_BUCKETS,
         "dev_item_ids": [it["item_id"] for it in dev],
         "test_item_ids": [it["item_id"] for it in test],
-        "dev_units": sorted({it["unit_id"] for it in dev}),
-        "test_units": sorted({it["unit_id"] for it in test}),
-        "shared_units": sorted(set(dev_units) & {it["unit_id"] for it in test}),
-        "shared_quote_hashes": sorted(dev_quotes &
-                                      {sha256_text((it["evidence"][0] or {}).get("quote", ""))
-                                       for it in test}),
+        "dev_units": sorted(dev_units),
+        "test_units": sorted(test_units),
+        "shared_units": sorted(dev_units & test_units),
+        "shared_quote_hashes": sorted(dev_quotes & test_quotes),
         "dev": dev,
         "test": test,
     }
+
+
+def contract_field_names(case):
+    """Field names declared by the runtime output_contract, whatever its nesting."""
+    names = []
+
+    def add(value):
+        if isinstance(value, str):
+            names.append(value)
+        elif isinstance(value, dict):
+            name = value.get("name") or value.get("field") or value.get("id")
+            if name:
+                names.append(str(name))
+            else:  # mapping of field name -> type/spec
+                names.extend(str(key) for key in value)
+        elif isinstance(value, list):
+            for entry in value:
+                add(entry)
+
+    contract = case.get("output_contract") if isinstance(case, dict) else None
+    if isinstance(contract, dict):
+        containers = {"fields", "required", "optional", "properties", "version"}
+        if containers & set(contract):
+            for key in ("fields", "required", "optional", "properties"):
+                add(contract.get(key))
+            for key in contract:
+                if key not in containers:
+                    names.append(key)
+        else:
+            names.extend(contract.keys())
+    else:
+        add(contract)
+    seen, out = set(), []
+    for name in names:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def run_conditions(test_items, units, agents):
@@ -367,32 +397,31 @@ def main():
         "trace_chain": all(t["chain_ok"] for t in trace) if trace else False,
         "public_hides_gold": all("gold_answer" not in p and "evidence" not in p for p in public),
     }
-    if not items:
+    if not readable_docs:
         status = "failed"
-    elif all(checks.values()) and not unreadable and len(items) >= (
+    elif items and all(checks.values()) and not unreadable and len(items) >= (
             dataset["coverage"].get("requested_items") or 0):
         status = "success"
     else:
         status = "partial"
 
-    contract_names = []
-    oc = case.get("output_contract")
-    if isinstance(oc, dict):
-        contract_names = list(oc.keys())
-    elif isinstance(oc, list):
-        for entry in oc:
-            if isinstance(entry, str):
-                contract_names.append(entry)
-            elif isinstance(entry, dict):
-                name = entry.get("name") or entry.get("field") or entry.get("id")
-                if name:
-                    contract_names.append(str(name))
+    contract_names = contract_field_names(case)
 
+    reasons = []
+    if not readable_docs:
+        reasons.append("无可读来源材料")
+    if len(items) < (dataset["coverage"].get("requested_items") or 0):
+        reasons.append("题量不足 %s/%s" % (len(items),
+                                          dataset["coverage"].get("requested_items")))
+    if unreadable:
+        reasons.append("有 %d 个来源不可读" % len(unreadable))
+    if not all(checks.values()):
+        reasons.append("检查未全通过：" + ", ".join(k for k, v in checks.items() if not v))
     top = {
         "case_id": case_id,
         "status": status,
         "status_reason": ("所有检查通过且题量达标" if status == "success"
-                          else "见 uncertainty：题量不足/来源不可读/检查未全通过"),
+                          else "; ".join(reasons) or "见 uncertainty"),
         "benchmark": {
             "dataset_version": DATASET_VERSION,
             "dataset_sha256": dataset["dataset_sha256"],
@@ -445,17 +474,19 @@ def main():
     contract_fields, missing = {}, []
     for name in contract_names:
         if name in top:
-            contract_fields[name] = top[name]
+            value = top[name]
         elif name in ("main_result", "result", "answers"):
-            contract_fields[name] = {"items": top["items"], "readings": top["readings"]}
+            value = {"items": top["items"], "readings": top["readings"]}
         elif name in ("evidence", "citations", "sources_locator"):
-            contract_fields[name] = top["sources"]
+            value = top["sources"]
         elif name in ("version", "version_info"):
-            contract_fields[name] = {"dataset_version": DATASET_VERSION,
-                                     "report_version": REPORT_VERSION}
+            value = {"dataset_version": DATASET_VERSION,
+                     "report_version": REPORT_VERSION}
         else:
-            contract_fields[name] = None
+            value = None
             missing.append(name)
+        contract_fields[name] = value
+        top.setdefault(name, value)
     top["contract_fields"] = contract_fields
     if missing:
         top["uncertainty"].append({"type": "unmapped_contract_fields",

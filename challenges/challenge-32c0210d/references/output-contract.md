@@ -75,11 +75,34 @@
 ```
 
 `skipped_edits` 记录定位失败或超出边界的条目及原因，不影响其余交付。
+`deduped_edits` 记录"同段同词同目标"被更早条目覆盖而不再重复执行的命中（旧版静默丢弃）。
+
+### 3.1 工单目标执行（`workorder_execution`）
+
+工单里 `find/old/before` + `replace/new/after` 形式的条目逐条机械执行：
+
+```json
+{
+  "target_id": "W001", "find": "多头注意力", "replace": "多头自注意力",
+  "status": "applied", "scope": {"chapter": "2"},
+  "paragraphs": [{"paragraph_id": "P0023", "section": "2.1",
+                  "source_path": "chapter2.md", "occurrences": 1}],
+  "occurrences": 1
+}
+```
+
+未命中时 `status="not_found"`，附 `searched_paragraphs` 表示检索范围；不做模糊匹配。
+
+### 3.2 改动影响面（`edit_impact`）
+
+每条编辑后，同一旧写法仍出现在哪些段落：`edit_id / paragraph_id / section /
+source_path / excerpt`。用于回答"改一处后受影响段落能否被找出来"。
 
 ## 4. 自检（`self_check`，写入 result.json）
 
 | 检查项 | 通过条件 |
 |-|-|
+| `contract_declared` | `case.json` 是否声明了 `output_contract.required`（未声明时为 `false` 并写入 `uncertainty`） |
 | `contract_fields_present` | 契约必需字段全部非 `null` |
 | `finding_ids_unique` | finding id 无重复 |
 | `anchors_verbatim` | 每条 finding 的 `anchor_quote` 能在**修订前**对应段落逐字找到 |

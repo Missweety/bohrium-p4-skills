@@ -66,12 +66,41 @@ def read_json(path):
         return None, "JSON 解析失败: %s" % exc
 
 
-def read_text(path):
+TEXT_ENCODINGS = ("utf-8-sig", "gb18030", "utf-16")
+
+
+def read_text_meta(path):
+    """按 UTF-8 → GB18030 → UTF-16 顺序严格解码，返回 (text, meta)。
+
+    meta: {"encoding": 实际编码, "fallback": 是否非 UTF-8, "lossy": 是否含替换字符,
+           "error": 读取失败原因或 None}
+    非 UTF-8 材料不再静默返回空串（旧版会把 GBK 材料误报成"PDF 无文本层"）。
+    """
     try:
-        with open(path, "r", encoding="utf-8-sig") as fh:
-            return fh.read()
-    except Exception:
-        return ""
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return "", {"encoding": None, "fallback": False, "lossy": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+    if not raw.strip():
+        return "", {"encoding": None, "fallback": False, "lossy": False, "error": None}
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates = ("utf-16",)
+    else:
+        candidates = TEXT_ENCODINGS
+    for enc in candidates:
+        try:
+            return raw.decode(enc), {"encoding": enc, "fallback": enc != "utf-8-sig",
+                                     "lossy": False, "error": None}
+        except UnicodeDecodeError:
+            continue
+    text = raw.decode("utf-8", "replace")
+    return text, {"encoding": "utf-8(replace)", "fallback": True, "lossy": True,
+                  "error": None}
+
+
+def read_text(path):
+    return read_text_meta(path)[0]
 
 
 def find_file(input_dir, name):
@@ -119,14 +148,88 @@ def discover_materials(input_dir, case, case_dir):
     return unique, missing
 
 
+def material_labels(paths, input_dir):
+    """来源显示名：默认 basename；不同目录下重名时退回相对路径，避免来源混淆。"""
+    counts = {}
+    for p in paths:
+        counts[os.path.basename(p)] = counts.get(os.path.basename(p), 0) + 1
+    labels = {}
+    for p in paths:
+        base = os.path.basename(p)
+        if counts[base] > 1:
+            try:
+                labels[p] = os.path.relpath(p, input_dir)
+            except ValueError:
+                labels[p] = p
+        else:
+            labels[p] = base
+    return labels
+
+
+_ABS_PATH_RE = re.compile(r"(?<![\w.\-])(?:/[\w.\-+@%]+){2,}/?")
+
+
+def scrub_paths(text):
+    """产物里不写运行环境的绝对路径：错误信息只保留文件名/相对路径。"""
+    if not text:
+        return text
+    out = _ABS_PATH_RE.sub("", str(text))
+    out = re.sub(r"[:：]\s*$", "", out).strip()
+    return out or "(路径已省略)"
+
+
+FIND_KEYS = ("find", "old", "before", "from", "source_text", "orig", "original",
+             "原词", "原句", "原文")
+REPLACE_KEYS = ("replace", "new", "after", "to", "target_text", "replacement",
+                "改为", "新词", "新句")
+SCOPE_KEYS = ("paragraph_id", "para_id", "paragraph", "section", "chapter",
+              "file", "path", "where")
+REASON_KEYS = ("reason", "why", "note", "rationale", "basis", "说明", "依据")
+
+
+def _pick(node, keys):
+    for key in keys:
+        for k, v in node.items():
+            if str(k).lower() == key and isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
+def _as_target(node):
+    """识别 {"find": "...", "replace": "..."} 形式的工单显式改稿目标。"""
+    if not isinstance(node, dict):
+        return None
+    find = _pick(node, FIND_KEYS)
+    repl = _pick(node, REPLACE_KEYS)
+    if not find or not repl or find == repl:
+        return None
+    scope = {k: v for k, v in node.items()
+             if str(k).lower() in SCOPE_KEYS and isinstance(v, (str, int))}
+    return {"find": find, "replace": repl,
+            "reason": _pick(node, REASON_KEYS) or "",
+            "scope": {str(k).lower(): str(v) for k, v in scope.items()}}
+
+
 def parse_workorder(data):
-    """宽松解析 organizer-edit-workorder.json；不认识的结构登记原键名，不臆造语义。"""
+    """宽松解析 organizer-edit-workorder.json。
+
+    两类输入分开处理，互不混淆：
+      * 结构化改稿目标（find/old + replace/new [+ section/paragraph_id]）-> targets，
+        逐条机械落地并回报 applied / not_found / ambiguous；
+      * 自然语言指令 -> instructions，能被"“A”改为“B”"解析的转为术语替换，
+        其余登记为语义型指令（unparsed_instructions），不臆造语义。
+    """
     out = {"canonical_terms": {}, "instructions": [], "chapter_order": [],
-           "focus_terms": [], "raw_keys": [], "unparsed_instructions": []}
+           "focus_terms": [], "raw_keys": [], "unparsed_instructions": [],
+           "targets": []}
     if not isinstance(data, dict):
         return out
 
     def walk(node, top=False):
+        target = _as_target(node)
+        if target:
+            out["targets"].append(target)
+            return
         if isinstance(node, dict):
             for k, v in node.items():
                 kl = str(k).lower()
@@ -152,6 +255,8 @@ def parse_workorder(data):
                         if isinstance(it, str):
                             out["instructions"].append(it)
                         elif isinstance(it, dict):
+                            if _as_target(it):
+                                continue
                             for kk in ("instruction", "text", "detail", "description",
                                        "find", "old", "before"):
                                 if isinstance(it.get(kk), str):
@@ -176,6 +281,15 @@ def parse_workorder(data):
             out["unparsed_instructions"].append(s)
     out["canonical_terms"].update({k: v for k, v in pairs.items() if k != v})
     out["canonical_terms"] = {k: v for k, v in out["canonical_terms"].items() if k and v}
+    # 去重：同一对 find/replace 只执行一次，避免重复工单条目互相覆盖
+    seen, unique = set(), []
+    for t in out["targets"]:
+        key = (t["find"], t["replace"], tuple(sorted(t["scope"].items())))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(t)
+    out["targets"] = unique
     return out
 
 
@@ -211,29 +325,39 @@ def pdf_text(path, work_dir):
 
 
 def load_material(path, work_dir):
+    """返回 (doc, error, meta)。meta 记录实际编码与是否发生解码回退。"""
     ext = os.path.splitext(path)[1].lower()
     name = os.path.basename(path)
+    meta = {"encoding": None, "fallback": False, "lossy": False}
     try:
         if ext == ".docx":
-            return docx_io.load_docx(path, source_path=name), None
-        if ext in (".md", ".txt", ".pdf"):
-            txt = read_text(path) if ext != ".pdf" else pdf_text(path, work_dir)
-            if txt is None or not txt.strip():
-                return None, "PDF 无可提取文本层（需要 OCR / pdf-text-tool）"
-            tmp = os.path.join(work_dir, "from_text", os.path.splitext(name)[0] + ".docx")
-            docx_io.build_docx(docx_io.text_to_blocks(txt), tmp)
-            return docx_io.load_docx(tmp, source_path=name), None
-        return None, "不支持的类型: %s（旧版 .doc/.rtf 请先转 docx）" % ext
+            return docx_io.load_docx(path, source_path=name), None, meta
+        if ext == ".pdf":
+            txt = pdf_text(path, work_dir)
+            if txt is None:
+                return None, "PDF 无可提取文本层（需要 OCR / pdf-text-tool）", meta
+        elif ext in (".md", ".txt"):
+            txt, meta = read_text_meta(path)
+            if meta.get("error"):
+                return None, "文本读取失败：%s" % meta["error"], meta
+            if not txt.strip():
+                return None, "文本为空（0 个可见字符）", meta
+        else:
+            return None, "不支持的类型: %s（旧版 .doc/.rtf 请先转 docx）" % ext, meta
+        tmp = os.path.join(work_dir, "from_text", os.path.splitext(name)[0] + ".docx")
+        docx_io.build_docx(docx_io.text_to_blocks(txt), tmp)
+        return docx_io.load_docx(tmp, source_path=name), None, meta
     except docx_io.DocxError as exc:
-        return None, str(exc)
+        return None, str(exc), meta
     except Exception as exc:
-        return None, "抽取异常: %s" % exc
+        return None, "抽取异常: %s" % exc, meta
 
 
 def merge_to_blocks(docs):
-    """按原始顺序合并为 blocks，表格保持原位置。"""
+    """按原始顺序合并为 blocks，表格保持原位置，并给每个 block 记来源文件。"""
     blocks = []
     for d in docs:
+        src = d.get("source_path") or os.path.basename(d.get("path") or "merged")
         done = set()
         for p in d["paragraphs"]:
             if p.get("in_table"):
@@ -243,7 +367,7 @@ def merge_to_blocks(docs):
                 done.add(ti)
                 t = next((x for x in d["tables"] if x["index"] == ti), None)
                 if t and t["rows"]:
-                    blocks.append({"kind": "table", "rows": t["rows"]})
+                    blocks.append({"kind": "table", "rows": t["rows"], "source": src})
                 continue
             lvl = locate.style_level(p)
             if not lvl:
@@ -251,12 +375,25 @@ def merge_to_blocks(docs):
                 if hl and len(p["text"]) <= 80:
                     lvl = hl
             if lvl:
-                blocks.append({"kind": "heading", "level": lvl, "text": p["text"]})
+                blocks.append({"kind": "heading", "level": lvl, "text": p["text"],
+                               "source": src})
             elif locate.caption_info(p):
-                blocks.append({"kind": "caption", "text": p["text"]})
+                blocks.append({"kind": "caption", "text": p["text"], "source": src})
             else:
-                blocks.append({"kind": "para", "text": p["text"]})
+                blocks.append({"kind": "para", "text": p["text"], "source": src})
     return blocks
+
+
+def assign_provenance(blocks, paragraphs):
+    """把合并前的来源文件回填到重建后的段落（build_docx 每个 block 生成 1 段，
+    表格 block 每单元格生成 1 段），使每条 finding 能指回原始章节文件。"""
+    idx = 0
+    for b in blocks:
+        count = sum(len(r) for r in b.get("rows") or []) if b["kind"] == "table" else 1
+        for _ in range(count):
+            if idx < len(paragraphs):
+                paragraphs[idx]["source_path"] = b.get("source") or "merged"
+            idx += 1
 
 
 def rebuild_base(blocks, work_dir):
@@ -305,7 +442,8 @@ KIND_CN = {"terminology": "术语与缩写", "symbol": "符号", "definition": "
            "conclusion": "跨章节结论"}
 
 
-def render_report(case_id, analysis, edits, sources, status, limits):
+def render_report(case_id, analysis, edits, sources, status, limits,
+                  workorder_report=None, impact=None):
     f = analysis["findings"]
     lines = ["# 长文档一致性巡检报告", "",
              "- case_id：`%s`" % case_id, "- 状态：**%s**" % status,
@@ -340,7 +478,24 @@ def render_report(case_id, analysis, edits, sources, status, limits):
                 lines.append("  - 证据 `%s`：%s" % (ev.get("paragraph_id") or ev.get("table"), ev["quote"]))
         if x.get("evidence"):
             lines.append("")
-    lines += ["## 已自动修订", ""]
+    lines += ["", "## 工单改稿目标执行情况", ""]
+    if not workorder_report:
+        lines.append("本次 workorder 未提供 find/replace 形式的显式改稿目标。")
+    else:
+        lines += ["| 目标 | 查找 | 替换 | 状态 | 命中段落 |", "|-|-|-|-|-|"]
+        for r in workorder_report:
+            hit = ", ".join("%s(§%s, %d 处)" % (x["paragraph_id"], x.get("section"),
+                                               x["occurrences"])
+                            for x in (r.get("paragraphs") or [])) or "-"
+            lines.append("| %s | `%s` | `%s` | %s | %s |"
+                         % (r["target_id"], r["find"], r["replace"], r["status"], hit))
+    lines += ["", "## 改动影响面（同一旧写法仍出现的段落）", ""]
+    if not impact:
+        lines.append("未发现同一旧写法残留在其他段落。")
+    for im in impact or []:
+        lines.append("- `%s` 影响 %s（§%s）：%s" % (im["edit_id"], im["paragraph_id"],
+                                                   im.get("section"), im["excerpt"]))
+    lines += ["", "## 已自动修订", ""]
     if not edits:
         lines.append("本次没有满足自动修订边界（排版级/任务显式指定）的条目；所有问题转为人工处理。")
     for e in edits:
@@ -355,6 +510,7 @@ def render_report(case_id, analysis, edits, sources, status, limits):
 
 def self_check(payload, analysis, before_texts, verify_result, preview_info, required):
     errors, checks = [], {}
+    checks["contract_declared"] = bool(required)
     checks["contract_fields_present"] = all(payload.get(k) is not None for k in required)
     missing = [k for k in required if payload.get(k) is None]
     if missing:
@@ -400,36 +556,56 @@ def run(args):
     workorder = parse_workorder(wo_raw if isinstance(wo_raw, dict) else {})
 
     materials, missing = discover_materials(input_dir, case, os.path.dirname(case_path))
+    labels = material_labels(materials, input_dir)
     if workorder["chapter_order"]:
         order = {os.path.basename(x): i for i, x in enumerate(workorder["chapter_order"])}
         materials.sort(key=lambda p: (order.get(os.path.basename(p), 999), natural_key(p)))
 
-    sources, docs, errors = [], [], []
+    sources, docs, errors, uncertainty = [], [], [], []
     for path in materials:
-        doc, err = load_material(path, work_dir)
+        label = labels.get(path) or os.path.basename(path)
+        doc, err, meta = load_material(path, work_dir)
+        if doc is not None:
+            doc["source_path"] = label
         kind = os.path.splitext(path)[1].lstrip(".").lower()
         if doc is None:
-            sources.append({"path": os.path.basename(path), "kind": kind, "status": "unreadable",
-                            "paragraphs": 0, "error": err})
-            errors.append({"path": os.path.basename(path), "error": err})
+            sources.append({"path": label, "kind": kind, "status": "unreadable",
+                            "paragraphs": 0, "error": scrub_paths(err)})
+            errors.append({"path": label, "error": scrub_paths(err)})
         else:
-            sources.append({"path": os.path.basename(path), "kind": kind, "status": "parsed",
-                            "paragraphs": len(doc["paragraphs"]), "error": None})
+            entry = {"path": label, "kind": kind, "status": "parsed",
+                     "paragraphs": len(doc["paragraphs"]), "error": None}
+            if meta.get("encoding"):
+                entry["encoding"] = meta["encoding"]
+            sources.append(entry)
             docs.append(doc)
+            if meta.get("fallback"):
+                uncertainty.append({
+                    "item": label, "where": "extraction",
+                    "reason": "文件不是 UTF-8，已按 %s 解码；若正文出现乱码请转存为 UTF-8。"
+                              % meta.get("encoding")})
 
     change_log = [{"action": "input_scan", "detail": {
-        "case_json": case_path if os.path.exists(case_path) else None,
+        "case_json": os.path.basename(case_path) if os.path.exists(case_path) else None,
         "task_md": bool(task_text),
-        "workorder": {"path": wo_path, "keys": workorder["raw_keys"],
+        "workorder": {"path": os.path.basename(wo_path) if wo_path else None,
+                      "keys": workorder["raw_keys"],
                       "canonical_terms": workorder["canonical_terms"],
-                      "instructions": len(workorder["instructions"]), "error": wo_err},
-        "materials": [os.path.basename(m) for m in materials]}}]
-    uncertainty = [{"item": m, "reason": "case.json 声明的材料在 /input 中找不到", "where": "input"}
-                   for m in missing]
-    uncertainty += [{"item": e["path"], "reason": e["error"], "where": "extraction"} for e in errors]
-    uncertainty += [{"item": s, "where": "workorder",
-                     "reason": "语义型指令无法机械落地；需模型/人工按清单改写，未自动改写。"}
-                    for s in workorder["unparsed_instructions"]]
+                      "instructions": len(workorder["instructions"]),
+                      "targets": len(workorder["targets"]), "error": wo_err},
+        "materials": [labels.get(m) or os.path.basename(m) for m in materials]}}]
+    uncertainty.extend({"item": m, "reason": "case.json 声明的材料在 /input 中找不到",
+                        "where": "input"} for m in missing)
+    uncertainty.extend({"item": e["path"], "reason": e["error"], "where": "extraction"}
+                       for e in errors)
+    uncertainty.extend({"item": s, "where": "workorder",
+                        "reason": "语义型指令无法机械落地；需模型/人工按清单改写，未自动改写。"}
+                       for s in workorder["unparsed_instructions"])
+    contract_note = None
+    if not required:
+        contract_note = ("case.json 未声明 output_contract.required；已按内置字段集输出，"
+                         "无法核对组织方要求的字段清单。")
+        uncertainty.append({"item": "output_contract", "where": "contract", "reason": contract_note})
 
     if not docs:
         payload = {
@@ -454,7 +630,9 @@ def run(args):
     if len(docs) == 1:
         base, rebuild = docs[0], False
     else:
-        base, rebuild = rebuild_base(merge_to_blocks(docs), work_dir), True
+        blocks = merge_to_blocks(docs)
+        base, rebuild = rebuild_base(blocks, work_dir), True
+        assign_provenance(blocks, base["paragraphs"])
         uncertainty.append({"item": "格式", "where": "output",
                             "reason": "多份来源已合并重建为单一 docx：标题层级、正文与表格顺序保留，"
                                       "原始分页/页眉页脚/复杂域不保留。"})
@@ -467,10 +645,17 @@ def run(args):
                  "focus_terms": workorder["focus_terms"]}).run()
 
     before_texts = [p["text"] for p in ps]
+    # 工单显式目标优先执行（任务要求），其后才跑排版级术语归一，避免同段互相覆盖
+    target_rev = revise.apply_target_edits(base, workorder["targets"])
     rev = revise.apply_edits(base, analysis["findings"])
+    for i, e in enumerate(target_rev["edits"] + rev["edits"], start=1):
+        e["edit_id"] = "E%03d" % i
+    edits = target_rev["edits"] + rev["edits"]
+    skipped = target_rev["skipped"] + rev["skipped"]
     rev_path = os.path.join(out_dir, "revision.docx")
     docx_io.save_docx(base, rev_path)
-    verify_result = revise.verify(before_texts, rev_path, rev["edits"])
+    verify_result = revise.verify(before_texts, rev_path, edits)
+    impact = revise.edit_impact(base, edits)
 
     with open(os.path.join(out_dir, "revision.md"), "w", encoding="utf-8") as fh:
         fh.write(revise.render_markdown_from_doc(base))
@@ -483,20 +668,22 @@ def run(args):
                         os.path.join(out_dir, "preview.html"), title=case_id)
     write_csv(os.path.join(out_dir, "inconsistencies.csv"), analysis["findings"])
 
-    status = "partial" if (errors or rebuild or rev["skipped"] or
+    status = "partial" if (errors or rebuild or skipped or
                            prev["status"] != "rendered") else "success"
     limits = []
     if errors:
         limits.append("%d 个材料不可读，未纳入巡检（见 uncertainty）。" % len(errors))
     if rebuild:
         limits.append("多源合并重建稿件，原始分页/页眉页脚/复杂域未保留。")
-    if rev["skipped"]:
-        limits.append("%d 条自动修订被跳过（定位不到原文或超出自动修改边界）。" % len(rev["skipped"]))
+    if skipped:
+        limits.append("%d 条自动修订被跳过（定位不到原文或超出自动修改边界）。" % len(skipped))
     if prev["status"] != "rendered":
         limits.append("PDF 预览不可用：%s；已提供 preview.html。" % prev["reason"])
     if workorder["unparsed_instructions"]:
         limits.append("%d 条运行工单指令为语义型，未自动改写，已列入 uncertainty。"
                       % len(workorder["unparsed_instructions"]))
+    if contract_note:
+        limits.append(contract_note)
     limits_s = " ".join(limits)
 
     numbering_report = {
@@ -526,14 +713,26 @@ def run(args):
         "term_table": analysis["term_table"], "symbol_table": analysis["symbol_table"],
         "numbering_report": numbering_report, "coverage": analysis["coverage"],
         "severity_counts": analysis["severity_counts"],
-        "revision_edits": rev["edits"], "skipped_edits": rev["skipped"],
+        "revision_edits": edits, "skipped_edits": skipped,
+        "deduped_edits": rev["deduped"],
+        "workorder_execution": target_rev["report"],
+        "edit_impact": impact,
         "evidence": evidence, "sources": sources, "uncertainty": uncertainty,
         "change_log": change_log + [{"action": "auto_revision", "detail": {
-            "applied": len(rev["edits"]), "paragraphs_touched": rev["paragraphs_touched"],
-            "skipped": len(rev["skipped"])}}],
-        "limits": limits_s or "无。", "preview": prev,
-        "workorder": {"path": wo_path, "canonical_terms": workorder["canonical_terms"],
-                      "instructions": workorder["instructions"], "raw_keys": workorder["raw_keys"]},
+            "workorder_targets_applied": sum(1 for r in target_rev["report"]
+                                             if r["status"] == "applied"),
+            "workorder_targets_not_found": sum(1 for r in target_rev["report"]
+                                               if r["status"] == "not_found"),
+            "applied": len(edits), "paragraphs_touched": rev["paragraphs_touched"],
+            "skipped": len(skipped), "deduped": len(rev["deduped"])}}],
+        "limits": limits_s or "无。",
+        "preview": {"status": prev["status"], "reason": prev.get("reason"),
+                    "pdf": "preview.pdf" if prev["status"] == "rendered" else None,
+                    "html": "preview.html"},
+        "workorder": {"path": os.path.basename(wo_path) if wo_path else None,
+                      "canonical_terms": workorder["canonical_terms"],
+                      "instructions": workorder["instructions"],
+                      "raw_keys": workorder["raw_keys"]},
     }
     final, gaps = contract_payload(payload, required)
     final["contract_gaps"] = gaps
@@ -547,7 +746,8 @@ def run(args):
     with open(os.path.join(out_dir, "result.json"), "w", encoding="utf-8") as fh:
         json.dump(final, fh, ensure_ascii=False, indent=1)
     with open(os.path.join(out_dir, "consistency_report.md"), "w", encoding="utf-8") as fh:
-        fh.write(render_report(case_id, analysis, rev["edits"], sources, status, limits_s))
+        fh.write(render_report(case_id, analysis, edits, sources, status, limits_s,
+                               target_rev["report"], impact))
     with open(os.path.join(work_dir, "doc.json"), "w", encoding="utf-8") as fh:
         json.dump({"case_id": case_id, "sections": sections,
                    "paragraphs": [{"id": p["id"], "section": p["section"],
@@ -561,7 +761,7 @@ def run(args):
     with open(os.path.join(work_dir, "self_check.json"), "w", encoding="utf-8") as fh:
         json.dump(sc, fh, ensure_ascii=False, indent=1)
     print(json.dumps({"case_id": case_id, "status": status,
-                      "findings": len(analysis["findings"]), "edits": len(rev["edits"]),
+                      "findings": len(analysis["findings"]), "edits": len(edits),
                       "self_check_ok": sc["ok"], "preview": prev["status"]},
                      ensure_ascii=False))
     return 0

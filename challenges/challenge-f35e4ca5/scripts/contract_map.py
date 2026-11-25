@@ -308,11 +308,19 @@ def _parsed_payload(doc):
         if f.get("n") is not None and str(f["n"]) not in sample_sizes:
             sample_sizes.append(str(f["n"]))
     payload = {"units": units, "tables": tables, "figures": figures, "axes": axes,
+               "images": doc.get("images", []),
                "sample_sizes": sample_sizes, "source": "doc_extract"}
+    if doc.get("images"):
+        payload["image_pixel_reading"] = {
+            "performed": False,
+            "reason": "本 Skill 不执行 OCR/像素刻度读数；图片仅登记文件名、格式、宽高与哈希，见 images 字段",
+        }
     gaps = [name for name, val in (("tables", tables), ("figures", figures),
                                    ("axes", axes)) if not val]
     if gaps:
         payload["extraction_gaps"] = gaps
+    if doc.get("images"):
+        payload.setdefault("extraction_gaps", []).append("image_pixel_reading")
     return payload
 
 
@@ -401,6 +409,8 @@ def _value_from_slot(slot, doc, extra=None):
                     "figure_captions": len([c for c in captions
                                             if c.get("kind") == "figure"]),
                     "axes": len(doc.get("axes", [])),
+                    "images": len(doc.get("images", [])),
+                    "image_pixels_read": False if doc.get("images") else None,
                     "numbers": len(doc.get("numbers", [])),
                     "tier": doc.get("meta", {}).get("tier", "unknown")}
         return coverage

@@ -1,6 +1,7 @@
 ---
 name: academic-format-adaptation
 description: 把学术稿件套用目标期刊/学位论文模板或格式要求，生成真实可编辑的 DOCX（样式、页面、多级编号、题注、参考文献、页码域），并逐项核验输出、写出 format_report.json 与 result.json。Use for manuscript formatting, journal template adaptation, DOCX style application, format compliance checks.
+version: 1.1.0
 ---
 
 # academic-format-adaptation
@@ -104,6 +105,10 @@ python3 $S/verify_format.py --work /app/work --output /app/output --docx path/to
 `selfcheck.py` 额外检查契约字段、文件存在、DOCX 重开、报告计数自洽、占位符、
 `status` 与 `issues` 一致性。硬检查失败退出 1。
 
+`verify_format.py` 新增 `media.relationships`：扫描 `document.xml` 中的
+`r:embed/r:id/r:link`，逐个确认关系已在 `word/_rels/document.xml.rels` 声明，
+且图片/页眉/页脚目标部件真实存在于包内；悬空关系记 `failed`，不再默认成功。
+
 ## 异常处理表
 
 | 情况 | 行为 | status |
@@ -112,7 +117,7 @@ python3 $S/verify_format.py --work /app/work --output /app/output --docx path/to
 | 完全没有模板或要求 | 使用内置默认规格（A4、2.54cm、12pt、1.5 行距）并写 warning | `partial` |
 | `.doc` legacy 稿件 | 尝试 `textutil`/`soffice` 转 DOCX；失败则转文本并警告；无转换器则记录 unsupported | `partial` |
 | 任务要求未实现（公式/页眉版式/行号等） | 写入 `meta.unmatched_requirements`，报告中记 `unsupported` | `partial` |
-| 稿件缺参考文献/图/表 | 不虚构条目或对象；相应需求记 `partial`/`not_applicable` | `partial` |
+| 稿件缺参考文献/图/表 | 不虚构条目或对象；任务明确要求参考文献时记 `partial`，未要求时记 `not_applicable` | `partial`/`not_applicable` |
 | 空输入 / 无稿件内容 | 不生成空文档；`build_meta.status=failed`，`result.json` 仍写全字段 | `failed` |
 | 无 `soffice` | 不产出 PDF，不报页数；`export.pdf` 记 `partial` 并说明原因 | `partial` |
 | 字体本机缺失 | DOCX 仍写目标字体；渲染可能替换，记 `uncertainty` | 通常不影响 status |
@@ -152,3 +157,25 @@ python3 /skills/weekly-skill/scripts/selfcheck.py \
 ```
 
 `examples/README.md` 说明合成数据、预期关键输出与逐项核验方法。
+
+## 改动记录
+
+### 1.1.0（基于 1.0.0 / 05_skills_iter1）
+
+- 修复图片关系丢失：`package()` 先构建正文、再派生关系与 Content-Types，
+  图片（DOCX 稿件、Markdown `![]()`、行内图）现在有 `rIdImg*` 关系、`word/media/*`
+  实体与 png 等默认类型；此前引用的 `r:embed` 悬空，Word/渲染器不显示图片。
+- 新增 XML 级 `media.relationships` 核验：悬空 `r:embed/r:id/r:link` 记 `failed`，
+  避免「图片丢失但报告 success」。
+- 保留稿件超链接：源 `w:hyperlink` 按外部关系（`TargetMode="External"`）复制，
+  目标 URL 做 XML 转义；无法解析的对象关系记 `partial` issue。
+- 修复规格来源判定：`provenance` 递归展开到叶子路径，`is_default` 支持祖先回退，
+  不再把默认的 `references.heading`（References）当作用户要求，避免把中文
+  「参考文献」改写成「References」、把「图 1」题注改写成「Figure 1」。
+- 标题编号去重支持中文序号（`一、`、`（一）`、`第X章`），避免与 `numbering.xml`
+  自动编号叠加成「1 一、引言」；年份开头的标题不误删。
+- 无参考文献的稿件不再因默认 heading 被误判 `partial`；未要求参考文献时记
+  `not_applicable`。
+- 修正 Markdown 段落/题注的 `line` 归属（用段落起始行，而非 flush 行）。
+- 测试用于合成夹具（非评测答案）：DOCX 稿件+模板、Markdown 图片、行内图、
+  中文序号标题、超链接、空输入、GBK 字节、缺图、只有纸张要求等。

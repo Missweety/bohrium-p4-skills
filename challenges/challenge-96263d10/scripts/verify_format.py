@@ -185,7 +185,15 @@ def main(argv=None):
     prov = spec.get("provenance") or {}
 
     def is_default(path):
-        return ((prov.get(path) or {}).get("source") or "").startswith("builtin-default")
+        source = ((prov.get(path) or {}).get("source") or "")
+        if source:
+            return source.startswith("builtin-default")
+        parts = path.split(".")
+        for end in range(len(parts) - 1, 0, -1):
+            ancestor = ((prov.get(".".join(parts[:end])) or {}).get("source") or "")
+            if ancestor:
+                return ancestor.startswith("builtin-default")
+        return False
 
     ok, reason = C.docx_valid(docx_path)
     rep.add("docx.readable", "DOCX 可打开（zip + document.xml 解析）",
@@ -219,6 +227,36 @@ def main(argv=None):
         def resolved_style(sid):
             info = smap.get(sid) or {}
             return info
+
+        # ------------------------------------------- embedded relationships
+        rels_root = docx.xml("word/_rels/document.xml.rels")
+        rel_map = {}
+        for rel in (list(rels_root) if rels_root is not None else []):
+            rel_map[rel.get("Id")] = {
+                "type": rel.get("Type") or "",
+                "target": rel.get("Target") or "",
+                "mode": rel.get("TargetMode") or ""}
+        used_rids = sorted(set(re.findall(
+            r'r:(?:embed|id|link)="([^"]+)"', docx.text_xml("word/document.xml"))))
+        dangling = []
+        for rid in used_rids:
+            rel = rel_map.get(rid)
+            if not rel:
+                dangling.append("%s(未声明)" % rid)
+                continue
+            if rel["mode"] == "External":
+                continue
+            target = rel["target"].lstrip("/")
+            if not target.startswith("word/"):
+                target = "word/" + target
+            if not docx.has(target):
+                dangling.append("%s->%s" % (rid, rel["target"]))
+        rep.add("media.relationships", "图文关系可解析（r:embed/r:id）",
+                "%d 个引用全部指向包内部件" % len(used_rids),
+                "引用 %d 个，悬空 %d 个" % (len(used_rids), len(dangling)),
+                "applied" if not dangling else "failed",
+                "word/_rels/document.xml.rels",
+                "悬空关系：" + "；".join(dangling) if dangling else None)
 
         # ---------------------------------------------------- page / section
         width_cm = C.twips_to_cm(sect.get("page_width_twips"))
@@ -551,8 +589,10 @@ def main(argv=None):
                 ref_heading = x
                 break
         if not exp_refs and not obs_refs:
+            refs_requested = (not is_default("references.heading")) or any(
+                b.get("heading_role") == "references" for b in blocks)
             rep.add("references.entries", "参考文献条目", "无参考文献", "无参考文献",
-                    "partial" if refs.get("heading") else "not_applicable",
+                    "partial" if refs_requested else "not_applicable",
                     "word/document.xml#p[w:pStyle=Bibliography]",
                     "稿件中未发现参考文献条目；未虚构条目")
         else:
@@ -790,6 +830,7 @@ def main(argv=None):
         .get("page_count_method"),
         "pdf_fonts": (build_meta.get("rendering") or {}).get("fonts_detected"),
         "placeholder_hits": hits,
+        "dangling_relationships": dangling,
         "spec_conflicts": len(spec.get("conflicts") or []),
         "template_missing": (spec.get("meta") or {}).get("template_missing"),
     }

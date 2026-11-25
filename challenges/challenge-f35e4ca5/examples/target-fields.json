@@ -1,0 +1,11 @@
+{
+  "fields": [
+    {"field_id": "F1", "description": "x axis scale type (linear or log)"},
+    {"field_id": "F2", "description": "x axis unit"},
+    {"field_id": "F3", "description": "y axis unit"},
+    {"field_id": "F4", "description": "sample size n"},
+    {"field_id": "F5", "description": "viability at dose 10"},
+    {"field_id": "F6", "description": "significance marking for dose 100"},
+    {"field_id": "F7", "description": "error bar at dose 10"}
+  ]
+}

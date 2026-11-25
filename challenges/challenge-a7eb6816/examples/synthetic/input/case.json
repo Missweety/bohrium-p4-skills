@@ -1,0 +1,13 @@
+{
+ "case_id": "syn-transform-demo",
+ "output_contract": {
+  "transform_md": "markdown",
+  "preservation_map": "rows",
+  "glossary": "table",
+  "word_count": "int",
+  "title": "string",
+  "audience": "object",
+  "genre": "string",
+  "target_length": "object"
+ }
+}

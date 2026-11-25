@@ -108,6 +108,8 @@ class Builder(object):
         self.media_seq = 0
         self.rel_media = {}
         self.media_rel = {}
+        self.external_rel = {}
+        self.link_seq = 0
         self.issues = []
         self.warnings = []
         self.changes = []
@@ -137,7 +139,16 @@ class Builder(object):
 
     # ------------------------------------------------------------ helpers
     def prov_source(self, path):
-        return (self.prov.get(path) or {}).get("source") or ""
+        source = (self.prov.get(path) or {}).get("source")
+        if source:
+            return source
+        # all-scalar containers were flattened as one leaf in older specs
+        parts = path.split(".")
+        for end in range(len(parts) - 1, 0, -1):
+            ancestor = (self.prov.get(".".join(parts[:end])) or {}).get("source")
+            if ancestor:
+                return ancestor
+        return ""
 
     def spec_is_default(self, path):
         return self.prov_source(path).startswith("builtin-default")
@@ -204,21 +215,40 @@ class Builder(object):
         for rel in root:
             rid = rel.get("Id")
             if rid:
-                out[rid] = {"type": rel.get("Type", ""), "target": rel.get("Target", "")}
+                out[rid] = {"type": rel.get("Type", ""), "target": rel.get("Target", ""),
+                            "mode": rel.get("TargetMode", "")}
         return out
 
     def copy_media(self, rid, add_rel=True):
-        """Copy a source image rel into the new package, return new rId."""
+        """Copy a source rel into the new package, return new rId.
+
+        Images are copied as media parts; external hyperlinks keep their target
+        and are re-declared with TargetMode="External".  Unresolved rels raise a
+        partial issue instead of silently leaving a dangling r:id.
+        """
         if rid in self.rel_media:
             return self.rel_media[rid]
         rel = self.source_rels.get(rid)
         if not rel:
             return None
-        target = (rel.get("target") or "").lstrip("/")
+        rel_type = rel.get("type") or ""
+        target = rel.get("target") or ""
+        if rel.get("mode") == "External" or re.match(r"^(?:https?|mailto|ftp):", target):
+            self.link_seq += 1
+            new_rid = "rIdLink%d" % self.link_seq
+            self.rel_media[rid] = new_rid
+            self.external_rel[new_rid] = target
+            return new_rid
+        target = target.lstrip("/")
         if not target.startswith("word/"):
             target = "word/" + target
         data = self.source.read(target) if self.source else None
         if not data:
+            self.issues.append({
+                "id": "rel-unresolved-%s" % rid,
+                "issue": "source relationship %s (%s) has no part in the package; "
+                         "the copied object cannot resolve" % (rid, rel_type.rsplit("/", 1)[-1]),
+                "status": "partial"})
             return None
         ext = os.path.splitext(target)[1].lower().lstrip(".") or "png"
         self.media_seq += 1
@@ -263,6 +293,13 @@ class Builder(object):
             if new_rid:
                 xml = re.sub(r'r:(embed|id|link)="%s"' % re.escape(old_rid),
                              lambda m: 'r:%s="%s"' % (m.group(1), new_rid), xml)
+            else:
+                self.issues.append({
+                    "id": "rel-missing-%s" % old_rid,
+                    "issue": "paragraph %s references relationship %s which is not "
+                             "present in the source package; copied r:id will not resolve"
+                             % (block.get("anchor"), old_rid),
+                    "status": "partial", "anchor": block.get("anchor")})
         return xml
 
     # ------------------------------------------------------------ tables
@@ -280,6 +317,13 @@ class Builder(object):
             if new_rid:
                 xml = re.sub(r'r:(embed|id|link)="%s"' % re.escape(old_rid),
                              lambda m: 'r:%s="%s"' % (m.group(1), new_rid), xml)
+            else:
+                self.issues.append({
+                    "id": "rel-missing-%s" % old_rid,
+                    "issue": "table %s references relationship %s which is not present "
+                             "in the source package; copied r:id will not resolve"
+                             % (block.get("anchor"), old_rid),
+                    "status": "partial", "anchor": block.get("anchor")})
         return xml
 
     def table_borders(self):
@@ -748,7 +792,7 @@ class Builder(object):
                         self.heading_numbers[block["anchor"]] = counters
                         num = (1, level - 1)
                         # drop a literal number that duplicates the auto number
-                        stripped = re.sub(r"^\s*\d+(?:\.\d+)*[\.、]?\s+", "", text)
+                        stripped = C.strip_heading_number(text)
                         if stripped and stripped != text and len(stripped) > 1:
                             self.changes.append({
                                 "anchor": block["anchor"],
@@ -946,6 +990,9 @@ class Builder(object):
 
     # ------------------------------------------------------------ package
     def package(self):
+        # The document body is what registers images and hyperlinks, so it must
+        # be built before relationships and content types are derived.
+        document_xml = self.build_document()
         media_rels = sorted(self.media_rel.items(), key=lambda kv: kv[1])
 
         rels = ['<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/'
@@ -966,6 +1013,10 @@ class Builder(object):
             rels.append('<Relationship Id="%s" Type="http://schemas.openxmlformats.org/'
                         'officeDocument/2006/relationships/image" Target="%s"/>'
                         % (rid, name))
+        for rid, target in sorted(self.external_rel.items()):
+            rels.append('<Relationship Id="%s" Type="http://schemas.openxmlformats.org/'
+                        'officeDocument/2006/relationships/hyperlink" Target="%s" '
+                        'TargetMode="External"/>' % (rid, esc(target, True)))
         document_rels = (XML_DECL + '<Relationships xmlns="http://schemas.openxmlformats'
                          '.org/package/2006/relationships">' + "".join(rels)
                          + "</Relationships>")
@@ -1050,7 +1101,7 @@ class Builder(object):
             "_rels/.rels": root_rels,
             "docProps/core.xml": core,
             "docProps/app.xml": app,
-            "word/document.xml": self.build_document(),
+            "word/document.xml": document_xml,
             "word/styles.xml": self.styles_xml(),
             "word/numbering.xml": self.numbering_xml(),
             "word/settings.xml": settings,
@@ -1148,8 +1199,7 @@ def reopen_and_compare(path, inputs, builder):
             if kind == "heading":
                 # source may carry a literal number while the DOCX renders it
                 # through numbering.xml, so the paragraph text has no prefix
-                stripped = re.sub(r"^\s*(?:\d+(?:\.\d+)*)[\.\、]?\s+", "",
-                                  expected)
+                stripped = C.strip_heading_number(expected)
                 if stripped and stripped != expected:
                     candidates.append(stripped)
             if kind == "reference":

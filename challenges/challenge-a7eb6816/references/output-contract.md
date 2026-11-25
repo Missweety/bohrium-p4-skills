@@ -32,6 +32,8 @@ claim_id,kind,claim,source_doc,anchor,quote,quote_verified,strength,source_stren
 
 要求：正文中的每个结论/数字/局限都应有一行；`selfcheck` 在 `status=success` 时要求所有引文 `quote_verified=True`。
 
+`omissions` 的“已覆盖”判定：源段落与正文的词面重合率 ≥ 12%，**或**存在一条已核验且已定位、`anchor` 指向该段落的 claim。后者用于跨语言改写（英文源 → 中文稿），避免译文被误判为遗漏。
+
 ## 3. glossary.csv 列
 
 ```csv
@@ -124,6 +126,8 @@ term,plain_language,action,aliases,occurrences,inline_expanded,status,source_not
 
 注意：`status=success` 仍可能带 warning；但任何 error 都会使状态变为 `partial`。`failed` 只用于无来源、plan 缺失或正文为空。
 
+`title` / `audience` / `genre` / `target_length` 这 4 个键实际存放在 `result.transform` 下（不是 `result.json` 顶层），解析时优先从 `result.transform` 取值；早期版本误按顶层读取，会得到 `null`。
+
 ## 6. 指标口径（均由 transform.md 正文实际计算）
 
 正文 = `transform.md` 中 `## 术语与缩写` 之前的部分（含标题与章节小标题），附录不计入。
@@ -147,7 +151,7 @@ term,plain_language,action,aliases,occurrences,inline_expanded,status,source_not
 
 常见 error：`unsupported_number`、`quote_unverified`、`claim_missing_quote`、`claim_not_in_output`、`claim_strength_upgrade`、`fabricated_experience`、`fabricated_quote`、`glossary_plain_missing`、`glossary_not_expanded`、`unglossed_jargon`（非专业读者）、`omission_unlogged_number`、`omission_unlogged_limitation`、`limitations_absent`、`removal_missing_reason`、`no_claim_evidence`、`no_readable_sources`、`plan_missing`。
 
-常见 warn：`unsupported_genre`、`genre_element_missing`、`omission_unlogged`、`source_conflict`、`limitation_under_preserved`、`removal_risk_invalid`、`over_length_margin`、`under_length`、`sentences_too_long`、`jargon_density_high`、`declared_number_unused`、`contract_field_empty`、`unverified_quotation`、`jargon_retained`。
+常见 warn：`unsupported_genre`、`genre_element_missing`、`omission_unlogged`、`source_conflict`、`limitation_under_preserved`、`removal_risk_invalid`、`over_length_margin`、`under_length`、`sentences_too_long`、`jargon_density_high`、`declared_number_unused`、`contract_field_empty`、`unverified_quotation`、`jargon_retained`、`appendix_number_unsupported`。
 
 ## 8. selfcheck 的硬失败（退出码 1）
 
@@ -162,3 +166,5 @@ term,plain_language,action,aliases,occurrences,inline_expanded,status,source_not
 - `status=success` 但存在 error issue、未核验 claim 或未登记遗漏。
 
 自检只做“文件与声明是否自洽”，不替代原作者对学术内容的判断。
+
+`status=failed` 时，下列检查降为 warn（诚实失败不应被判成产物损坏）：`sources_readable`、`numbers_traceable`、`preservation_map_nonempty`、`contract_keys_nonnull`。其余硬检查（文件存在、契约键存在、指标可复算、`numbers_status_truthful`、`status=success` 的一致性）不变。

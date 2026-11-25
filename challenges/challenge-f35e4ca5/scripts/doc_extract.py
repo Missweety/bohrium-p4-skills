@@ -30,13 +30,17 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
+from xml.etree import ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_PAGES = 60
@@ -104,7 +108,7 @@ CAPTION_LABEL_RE = re.compile(
 )
 MD_EMPH_RE = re.compile(r"\*\*|__")
 TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
-SEP_CELL_RE = re.compile(r"^:?-{2,}:?$")
+SEP_CELL_RE = re.compile(r"^:?-+:?$")
 CAPTION_N_RE = re.compile(r"\bn\s*=\s*(\d+)\b", re.I)
 CAPTION_P_RE = re.compile(r"\bp\s*([<>=≤≥])\s*(\d+(?:\.\d+)?)", re.I)
 CAPTION_ERR_RE = re.compile(r"\bs\.?\s*e\.?\s*m\.?\b", re.I)
@@ -122,6 +126,20 @@ TEX_SECTION_RE = re.compile(r"\\(?:sub)*section\*?\{([^}]*)\}")
 TEX_FIGURE_RE = re.compile(r"\\begin\{(figure|table)\*?\}(.*?)\\end\{\1\*?\}", re.S)
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 SENT_END_RE = re.compile(r"(?<=[.!?。！？])[\s　]+|(?<=[\.\u2026])[\s　]+(?=[A-Z(])")
+
+
+def read_text(path):
+    """按 UTF-8 → GB18030 → UTF-16(BOM) 的顺序解码，避免中文材料变成乱码。"""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "replace")
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
 
 
 def _run(cmd, timeout=180):
@@ -223,7 +241,7 @@ def extract_pdf(path, workdir, extractor="auto", max_pages=MAX_PAGES):
                         "chars": fb["chars"], "pages": fb["pages_total"],
                         "pages_used": fb["pages_used"],
                         "chars_per_page": fb["chars_per_page"],
-                        "text_path": out_path, "attempts": attempts,
+                        "text_path": os.path.basename(out_path), "attempts": attempts,
                         "truncated": fb["truncated"], "warnings": fb["warnings"]}
                 return text, meta, pages
             attempts.append({"tool": "stdlib-pdf", "error": "no text extracted",
@@ -242,14 +260,13 @@ def extract_pdf(path, workdir, extractor="auto", max_pages=MAX_PAGES):
     meta = {"tool": "pdftotext", "tier": "pdftotext", "mode": mode_used,
             "chars": chars, "pages": total, "pages_used": len(pages),
             "chars_per_page": round(chars / max(1, len(pages)), 1),
-            "text_path": os.path.join(workdir, "extracted_%s.txt" % mode_used),
+            "text_path": os.path.basename(os.path.join(workdir, "extracted_%s.txt" % mode_used)),
             "attempts": attempts, "truncated": total > len(pages)}
     return text, meta, pages
 
 
 def tex_to_text(path):
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        raw = fh.read()
+    raw = read_text(path)
     raw = re.sub(r"(?<!\\)%.*", "", raw)
     raw = TEX_FIGURE_RE.sub(" ", raw, flags=re.S)
     raw = re.sub(r"\\(cite|ref|label|footnote|url|includegraphics)\{[^}]*\}", " ", raw)
@@ -278,34 +295,32 @@ def docx_to_text(path):
 def extract_any(path, workdir, extractor="auto", max_pages=MAX_PAGES):
     ext = os.path.splitext(path)[1].lower()
     if ext in (".txt", ".md", ".rst", ".csv", ".json", ".jsonl", ".tsv"):
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        text = read_text(path)
         pages = pages_from_text(text)
         return text, {"tool": "plain-text", "tier": "plain-text", "mode": "as-is",
                       "chars": len(text.strip()), "pages": len(pages),
                       "pages_used": len(pages),
                       "chars_per_page": round(len(text.strip()) / max(1, len(pages)), 1),
-                      "text_path": path, "attempts": [], "truncated": False}, pages
+                      "text_path": os.path.basename(path), "attempts": [], "truncated": False}, pages
     if ext == ".tex":
         text = tex_to_text(path)
         pages = pages_from_text(text)
         return text, {"tool": "tex", "tier": "plain-text", "mode": "tex",
                       "chars": len(text.strip()), "pages": len(pages),
-                      "pages_used": len(pages), "text_path": path,
+                      "pages_used": len(pages), "text_path": os.path.basename(path),
                       "attempts": [], "truncated": False}, pages
     if ext == ".docx":
         text = docx_to_text(path)
         pages = pages_from_text(text)
         return text, {"tool": "docx", "tier": "plain-text", "mode": "docx",
                       "chars": len(text.strip()), "pages": len(pages),
-                      "pages_used": len(pages), "text_path": path,
+                      "pages_used": len(pages), "text_path": os.path.basename(path),
                       "attempts": [], "truncated": False}, pages
     if ext == ".pdf":
         return extract_pdf(path, workdir, extractor, max_pages)
     # 其它：尝试按文本读
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        text = read_text(path)
     except OSError:
         return "", {"tool": "none", "tier": "unreadable", "mode": "none",
                     "attempts": [{"tool": "read", "error": "binary"}], "chars": 0,
@@ -313,7 +328,7 @@ def extract_any(path, workdir, extractor="auto", max_pages=MAX_PAGES):
     pages = pages_from_text(text)
     return text, {"tool": "plain-text", "tier": "plain-text", "mode": "as-is",
                   "chars": len(text.strip()), "pages": len(pages),
-                  "pages_used": len(pages), "text_path": path,
+                  "pages_used": len(pages), "text_path": os.path.basename(path),
                   "attempts": [], "truncated": False}, pages
 
 
@@ -750,13 +765,175 @@ def mine_axes(units):
     return axes
 
 
+def _image_size(raw):
+    """只读文件头取宽高（PNG/JPEG/GIF/BMP/WebP），不解码像素。"""
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", raw[16:24])
+            return "png", w, h
+        if raw[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", raw[6:10])
+            return "gif", w, h
+        if raw[:2] == b"BM":
+            w, h = struct.unpack("<ii", raw[18:26])
+            return "bmp", abs(w), abs(h)
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            if raw[12:16] == b"VP8X":
+                w = int.from_bytes(raw[24:27], "little") + 1
+                h = int.from_bytes(raw[27:30], "little") + 1
+                return "webp", w, h
+            return "webp", None, None
+        if raw[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(raw):
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = raw[i + 1]
+                if marker in (0xD8, 0xD9):
+                    i += 2
+                    continue
+                seg = int.from_bytes(raw[i + 2:i + 4], "big")
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", raw[i + 5:i + 9])
+                    return "jpeg", w, h
+                i += 2 + seg
+    except Exception:
+        pass
+    return None, None, None
+
+
+def probe_image(path):
+    """登记图片元数据；像素读数不在本 Skill 能力内，由上层明确列为缺口。"""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(65536)
+        sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    except OSError as exc:
+        return {"file": os.path.basename(path), "readable": False,
+                "diagnostics": ["image_unreadable: %s" % exc]}
+    fmt, width, height = _image_size(raw)
+    return {"file": os.path.basename(path), "format": fmt, "width": width,
+            "height": height, "bytes": os.path.getsize(path), "sha256": sha,
+            "readable": True, "pixel_reading": "not_performed",
+            "note": "只登记图片元数据；刻度/图例/数据点像素读数未执行，列为缺口，不臆造数值"}
+
+
+def _matrix_table(header_cells, data_rows, rel, start_index, page=1, caption=""):
+    tid = "tab.%d" % start_index
+    header = _header_units([str(c) for c in header_cells])
+    header_quote = "| " + " | ".join(str(c) for c in header_cells) + " |"
+    rows = []
+    for k, cells in enumerate(data_rows, 1):
+        cells = ["" if c is None else str(c) for c in cells]
+        raw = "| " + " | ".join(cells) + " |"
+        anchor = "%s/row.%d" % (tid, k)
+        rows.append({"row": k, "page": page, "anchor": anchor,
+                     "page_anchor": "p.%d/%s" % (page, anchor),
+                     "raw": raw, "row_quote": raw, "cells": cells,
+                     "values": _row_values(cells, header, anchor, raw)})
+    return {"id": tid, "page": page, "caption": caption or rel,
+            "caption_anchor": None, "caption_id": None,
+            "layout": "tabular_file", "header": header,
+            "header_quote": header_quote, "header_anchor": "p.%d/%s" % (page, tid),
+            "rows": rows, "data_rows": len(rows)}
+
+
+def _xlsx_sheets(path):
+    """纯标准库读 xlsx：sharedStrings + 每张工作表 → [[cell,...], ...]。"""
+    out = []
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.iter():
+                if si.tag.split("}")[-1] == "si":
+                    shared.append("".join(t.text or "" for t in si.iter()
+                                          if t.tag.split("}")[-1] == "t"))
+        titles = []
+        if "xl/workbook.xml" in names:
+            root = ET.fromstring(zf.read("xl/workbook.xml"))
+            for el in root.iter():
+                if el.tag.split("}")[-1] == "sheet":
+                    titles.append(el.get("name") or "")
+        sheet_names = sorted(n for n in names
+                             if re.match(r"xl/worksheets/sheet\d+\.xml$", n))
+        for idx, sn in enumerate(sheet_names):
+            root = ET.fromstring(zf.read(sn))
+            matrix = []
+            for row in root.iter():
+                if row.tag.split("}")[-1] != "row":
+                    continue
+                cells = {}
+                for c in row:
+                    if c.tag.split("}")[-1] != "c":
+                        continue
+                    col = re.match(r"([A-Z]+)", c.get("r") or "")
+                    if not col:
+                        continue
+                    ci = 0
+                    for ch in col.group(1):
+                        ci = ci * 26 + (ord(ch) - 64)
+                    ci -= 1
+                    typ = c.get("t")
+                    val = ""
+                    if typ == "s":
+                        v = next((x for x in c if x.tag.split("}")[-1] == "v"), None)
+                        if v is not None and v.text is not None:
+                            j = int(v.text)
+                            val = shared[j] if 0 <= j < len(shared) else ""
+                    elif typ == "inlineStr":
+                        val = "".join(t.text or "" for t in c.iter()
+                                      if t.tag.split("}")[-1] == "t")
+                    else:
+                        v = next((x for x in c if x.tag.split("}")[-1] == "v"), None)
+                        val = (v.text or "") if v is not None else ""
+                    cells[ci] = val
+                if cells:
+                    width = max(cells) + 1
+                    matrix.append([cells.get(i, "") for i in range(width)])
+            if matrix:
+                out.append((titles[idx] if idx < len(titles) else os.path.basename(sn),
+                            matrix))
+    return out
+
+
+def load_tabular(path, rel, start_index):
+    """把 CSV/TSV/XLSX 表读成与 mine_tables 相同结构的表；失败返回 ([], 诊断)。"""
+    ext = os.path.splitext(path)[1].lower()
+    tables, diags = [], []
+    try:
+        if ext in (".csv", ".tsv"):
+            delim = "\t" if ext == ".tsv" else ","
+            rows = [r for r in csv.reader(read_text(path).splitlines(), delimiter=delim)
+                    if any((c or "").strip() for c in r)]
+            if len(rows) >= 2:
+                tables.append(_matrix_table(rows[0], rows[1:], rel, start_index,
+                                             caption="tabular file: %s" % rel))
+        elif ext == ".xlsx":
+            for name, matrix in _xlsx_sheets(path):
+                if len(matrix) < 2:
+                    continue
+                tables.append(_matrix_table(matrix[0], matrix[1:], rel,
+                                             start_index + len(tables),
+                                             caption="xlsx sheet: %s" % name))
+    except Exception as exc:  # noqa: BLE001
+        diags.append("tabular_unreadable: %s (%s)" % (rel, exc))
+    return tables, diags
+
+
 def build_doc(path, workdir, extractor="auto", max_pages=MAX_PAGES):
     text, meta, pages = extract_any(path, workdir, extractor, max_pages)
-    units = split_units(pages) if pages else []
+    # Markdown 表格行已由 mine_tables 单独解析；从叙述文本剔除，避免坐标轴引文吞掉整张表
+    narr_pages = ["\n".join(line for line in p.splitlines()
+                            if not line.strip().startswith("|")) for p in pages]
+    units = split_units(narr_pages) if narr_pages else []
     meta = dict(meta)
     meta["source_file"] = os.path.basename(path)
     meta["language"] = "zh" if len(CJK_RE.findall(text[:20000])) > 200 else "en"
-    captions = mine_captions(pages)
+    captions = mine_captions(narr_pages)
     doc = {
         "meta": meta,
         "pages": [{"page": i + 1, "chars": len(p)} for i, p in enumerate(pages)],
@@ -766,6 +943,7 @@ def build_doc(path, workdir, extractor="auto", max_pages=MAX_PAGES):
         "captions": captions,
         "figures": [c for c in captions if c.get("kind") == "figure"],
         "axes": mine_axes(units) if units else [],
+        "images": [],
         "text": text,
     }
     if path.lower().endswith(".pdf"):

@@ -36,7 +36,7 @@ def _occurrences(text, needle, word_boundary=False):
 
 
 def plan_edits(findings):
-    by_para = {}
+    by_para, dropped, seen = {}, [], set()
     for f in findings:
         if not f.get("auto_fixable"):
             continue
@@ -45,22 +45,30 @@ def plan_edits(findings):
             continue
         if f["rule"] == "terminology.latin_variant":
             canonical = f.get("canonical")
-            for v in [x for x in (f.get("variants") or []) if x != canonical]:
-                by_para.setdefault(pid, []).append(
-                    {"needle": v, "new": canonical, "finding_id": f["id"],
-                     "rule": f["rule"], "basis": f.get("why", ""), "boundary": True})
+            variants = [x for x in (f.get("variants") or []) if x != canonical]
+            boundary = True
         elif f["rule"] == "terminology.workorder_term":
-            good = f.get("canonical")
-            for v in (f.get("variants") or []):
-                if v and v != good:
-                    by_para.setdefault(pid, []).append(
-                        {"needle": v, "new": good, "finding_id": f["id"],
-                         "rule": f["rule"], "basis": f.get("why", ""), "boundary": False})
-    return by_para
+            canonical = f.get("canonical")
+            variants = [x for x in (f.get("variants") or []) if x and x != canonical]
+            boundary = False
+        else:
+            continue
+        for v in variants:
+            key = (pid, v, canonical)
+            if key in seen:
+                # 同一段落同一替换被多条规则/指令命中时只执行一次，但仍如实记录
+                dropped.append({"finding_id": f["id"], "paragraph_id": pid,
+                                "needle": v, "reason": "与更早命中的替换重复（同段同词同目标）"})
+                continue
+            seen.add(key)
+            by_para.setdefault(pid, []).append(
+                {"needle": v, "new": canonical, "finding_id": f["id"],
+                 "rule": f["rule"], "basis": f.get("why", ""), "boundary": boundary})
+    return by_para, dropped
 
 
 def apply_edits(doc, findings):
-    by_para = plan_edits(findings)
+    by_para, dropped = plan_edits(findings)
     para_by_id = {p["id"]: p for p in doc["paragraphs"]}
     edits, skipped, touched = [], [], 0
     for pid, items in by_para.items():
@@ -89,6 +97,7 @@ def apply_edits(doc, findings):
                 "edit_id": "E%03d" % (len(edits) + 1),
                 "finding_id": it["finding_id"], "rule": it["rule"],
                 "paragraph_id": pid, "section": p.get("section"),
+                "source_path": p.get("source_path"),
                 "char_start": s, "char_end": e,
                 "before": original[s:e], "after": it["new"],
                 "context_before": original[a:s] + "[" + original[s:e] + "]" + original[e:b],
@@ -97,7 +106,91 @@ def apply_edits(doc, findings):
                 "segments_written": seg_applied,
             })
         touched += 1
-    return {"edits": edits, "skipped": skipped, "paragraphs_touched": touched}
+    return {"edits": edits, "skipped": skipped, "deduped": dropped,
+            "paragraphs_touched": touched}
+
+
+def _in_scope(p, scope):
+    pid = scope.get("paragraph_id") or scope.get("para_id") or scope.get("paragraph")
+    if pid:
+        return p["id"].lower() == str(pid).lower()
+    if scope.get("section"):
+        return (p.get("section") or "") == scope["section"]
+    if scope.get("chapter"):
+        want = scope["chapter"]
+        sec = (p.get("section") or "").split(".")[0].lstrip("§")
+        return sec == want
+    if scope.get("file"):
+        return (p.get("source_path") or "").split("/")[-1] == str(scope["file"]).split("/")[-1]
+    return True
+
+
+def apply_target_edits(doc, targets):
+    """机械执行 workorder 中 find/replace 形式的显式改稿目标。
+
+    逐条回报 applied / not_found，applied 时给出段落、章节、出现次数；
+    找不到就如实记 not_found，不做模糊匹配、不改写原意。
+    """
+    edits, report, skipped = [], [], []
+    for i, t in enumerate(targets, start=1):
+        tid = "W%03d" % i
+        scope = t.get("scope") or {}
+        cands = [p for p in doc["paragraphs"] if not p.get("in_table")]
+        if scope:
+            cands = [p for p in cands if _in_scope(p, scope)]
+        hits = [(p, _occurrences(p["text"], t["find"])) for p in cands]
+        hits = [(p, occ) for p, occ in hits if occ]
+        if not hits:
+            report.append({"target_id": tid, "find": t["find"], "replace": t["replace"],
+                           "status": "not_found", "reason": t.get("reason", ""),
+                           "scope": scope or {}, "searched_paragraphs": len(cands)})
+            skipped.append({"target_id": tid, "needle": t["find"],
+                            "reason": "工单目标在检索范围内未逐字命中"})
+            continue
+        paragraphs = []
+        for p, occ in hits:
+            original = p["text"]
+            reps = [(s, e, t["replace"]) for s, e in occ]
+            seg_applied = docx_io.patch_paragraph(p, reps)
+            for s, e in occ:
+                a, b = max(0, s - 12), min(len(original), e + 12)
+                edits.append({
+                    "edit_id": "E%03d" % (len(edits) + 1),
+                    "target_id": tid, "finding_id": None, "rule": "workorder.target",
+                    "paragraph_id": p["id"], "section": p.get("section"),
+                    "source_path": p.get("source_path"),
+                    "char_start": s, "char_end": e,
+                    "before": original[s:e], "after": t["replace"],
+                    "context_before": original[a:s] + "[" + original[s:e] + "]" + original[e:b],
+                    "context_after": original[a:s] + "[" + t["replace"] + "]" + original[e:b],
+                    "basis": t.get("reason") or "工单显式指定", "confidence": "high",
+                    "segments_written": seg_applied,
+                })
+            paragraphs.append({"paragraph_id": p["id"], "section": p.get("section"),
+                               "source_path": p.get("source_path"),
+                               "occurrences": len(occ)})
+        report.append({"target_id": tid, "find": t["find"], "replace": t["replace"],
+                       "status": "applied", "reason": t.get("reason", ""),
+                       "scope": scope or {}, "paragraphs": paragraphs,
+                       "occurrences": sum(x["occurrences"] for x in paragraphs)})
+    return {"edits": edits, "skipped": skipped, "report": report}
+
+
+def edit_impact(doc, edits, limit=30):
+    """改一处后，同一旧写法还出现在哪些段落（供作者继续跟进）。"""
+    out = []
+    for e in edits:
+        for p in doc["paragraphs"]:
+            if p["id"] == e["paragraph_id"] or p.get("in_table"):
+                continue
+            if e["before"] and e["before"] in p["text"]:
+                out.append({"edit_id": e["edit_id"], "paragraph_id": p["id"],
+                            "section": p.get("section"),
+                            "source_path": p.get("source_path"),
+                            "excerpt": p["text"][:60]})
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def verify(before_texts, out_path, edits):

@@ -1,0 +1,57 @@
+{
+ "case_id": "syn-transform-demo",
+ "title": "更冷的保存，真的能保住更多细胞吗？",
+ "audience": {
+  "who": "对生命科学感兴趣的普通公众",
+  "prior_knowledge": "none",
+  "purpose": "了解低温保存与细胞回收率的关系，以及这项结果的边界",
+  "reading_level": "高中"
+ },
+ "genre": "popular_science",
+ "target_length": {"max_words": 600, "max_chars": 1200},
+ "sections": [
+  {"id": "s1", "heading": "一项简单对照实验", "role": "hook",
+   "paragraphs": ["把细胞放进更冷的条件保存，回收率会不会变？一项对照实验给出了具体数字。"]},
+  {"id": "s2", "heading": "关键结果", "role": "finding",
+   "paragraphs": ["对照组回收率为 92%，冷却组降至 71%，两者相差 21 个百分点；每组各 24 个样本。"]},
+  {"id": "s3", "heading": "差异有多大把握", "role": "evidence",
+   "paragraphs": ["研究者给出 95% 置信区间（估计结果可能波动的范围）为 8 到 34 个百分点。"]},
+  {"id": "s4", "heading": "需要保留的边界", "role": "limitations",
+   "paragraphs": ["作者提醒，这只是一项初步结果：只测试了一种细胞系，样本量较小，无法确立因果关系，也不能排除批次效应。补充说明还提到，有一个批次被排除在主分析之外。"]}
+ ],
+ "claim_evidence": [
+  {"id": "c1", "kind": "number",
+   "claim": "对照组回收率为 92%，冷却组降至 71%，两者相差 21 个百分点；每组各 24 个样本。",
+   "anchor": "doc.2 p.1 sec.1 para.2",
+   "quote": "Recovery was 92% in the control group and 71% in the cooled group (difference 21 percentage points, n = 24 per group).",
+   "section": "s2", "strength": "association", "source_strength": "association"},
+  {"id": "c2", "kind": "claim",
+   "claim": "这只是一项初步结果：只测试了一种细胞系，样本量较小，无法确立因果关系，也不能排除批次效应。",
+   "anchor": "doc.2 p.1 sec.3 para.6",
+   "quote": "Only one cell line was tested, and the sample size was small. The study cannot establish causality or rule out batch effects.",
+   "section": "s4", "strength": "preliminary", "source_strength": "preliminary"},
+  {"id": "c3", "kind": "claim",
+   "claim": "有一个批次被排除在主分析之外。",
+   "anchor": "doc.1 p.1 sec.1 para.1",
+   "quote": "Batch note: one batch was excluded from the main analysis.",
+   "section": "s4", "strength": "fact", "source_strength": "fact"},
+  {"id": "c4", "kind": "number",
+   "claim": "95% 置信区间（估计结果可能波动的范围）为 8 到 34 个百分点。",
+   "anchor": "doc.2 p.1 sec.2 para.4",
+   "quote": "The 95% confidence interval for the difference was 8 to 34 percentage points.",
+   "section": "s3", "strength": "fact", "source_strength": "fact"}
+ ],
+ "glossary": [
+  {"term": "置信区间", "plain": "估计结果可能波动的范围", "action": "expand"},
+  {"term": "细胞系", "plain": "实验室中持续培养的一类细胞", "action": "keep"},
+  {"term": "批次效应", "plain": "不同批次实验条件差异带来的系统性偏差", "action": "keep"}
+ ],
+ "removals": [
+  {"removed": "table.csv 中的分组统计表（与正文数值重复）",
+   "source_anchor": "doc.3 p.1",
+   "reason": "表格数值已在正文引用，保留会打断科普叙事", "risk": "low"}
+ ],
+ "numbers": [],
+ "uncertainty": ["原文未说明冷却条件的具体温度与时长，正文不做补充"],
+ "change_log": []
+}

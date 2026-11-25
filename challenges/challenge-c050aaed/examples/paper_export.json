@@ -1,0 +1,23 @@
+{
+  "annotations": [
+    {
+      "type": "highlight",
+      "page": 1,
+      "quote": "uncertain association",
+      "comment": "Question: is this causal?",
+      "color": "#ffd400",
+      "tags": ["待验证"],
+      "author": "Reader",
+      "source": "paper.md",
+      "rect": "10,20,100,40"
+    },
+    {
+      "type": "highlight",
+      "page": 1,
+      "quote": "this sentence does not exist",
+      "comment": "stale anchor",
+      "tags": ["待验证"],
+      "source": "paper.md"
+    }
+  ]
+}

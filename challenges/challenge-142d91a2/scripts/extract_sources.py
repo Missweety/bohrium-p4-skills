@@ -450,6 +450,16 @@ def _extract_one(path, sid, rel_path):
         source["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:300])
         return source
     source["readable"] = bool(source["paragraphs"])
+    if ext in (".md", ".markdown", ".txt", ".csv", ".tsv", ".tex", ".latex",
+               ".json", ".html", ".htm"):
+        # 记录实际解码方式：GBK 等非 UTF-8 材料以前会被静默替换成乱码且仍标 readable
+        _text, meta = common.read_text_meta(path)
+        if meta.get("encoding"):
+            source["encoding"] = meta["encoding"]
+            source["encoding_fallback"] = bool(meta.get("fallback"))
+        if meta.get("lossy"):
+            source["readable"] = False
+            source["error"] = "编码无法识别（已用替换字符解码），请转存为 UTF-8 或 GB18030"
     if not source["readable"]:
         source["error"] = source["error"] or "no extractable text"
     source["chars"] = sum(len(p["text"]) for p in source["paragraphs"])

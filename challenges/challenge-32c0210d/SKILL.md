@@ -1,7 +1,7 @@
 ---
 name: thesis-consistency-auditor
 description: 面向学位论文/长篇综述的跨章节一致性巡检与可定位修订。真实解析 DOCX（含表格单元格、样式与编号），抽取术语、符号、章节/图表/公式编号、正文引用与参考文献表，产出带“段落号+句号+逐字引文”的不一致清单，并只对排版级/工单显式术语做最小侵入修订，交付可继续编辑的 docx、Markdown、diff、CSV 与预览。
-version: 2.0.0
+version: 3.0.0
 license: MIT
 ---
 
@@ -41,14 +41,19 @@ python3 "$SKILL_DIR/scripts/run_case.py" --check /app/output      # 交付前自
 
 1. **输入发现**：读 `case.json`（`materials/chapters/files` 等键）、`task.md`、
    `organizer-edit-workorder.json`；`materials` 缺失时递归扫描 `/input` 下的
-   `.docx/.md/.txt/.pdf`；按工单 `chapter_order` 或自然序稳定排序；
+   `.docx/.md/.txt/.pdf`；按工单 `chapter_order` 或自然序稳定排序（重名文件用相对路径区分）；
 2. **抽取**：docx 走真实 OOXML 解析（`word/document.xml` + `styles.xml` + `numbering.xml`，
-   表格单元格段落单独编号）；md/txt 转为 docx 再解析；pdf 走 `pdftotext`，无文本层如实报错；
-3. **合并**：多份来源按原顺序合并为单一 docx（表格保持原位置），并在 `limits` 声明格式损失；
+   表格单元格段落单独编号）；md/txt 按 UTF-8 → GB18030 → UTF-16 严格解码后转为 docx 再解析，
+   发生编码回退会写入 `sources[].encoding` 与 `uncertainty`；pdf 走 `pdftotext`，无文本层如实报错；
+3. **合并**：多份来源按原顺序合并为单一 docx（表格保持原位置），每个 block 记录来源文件，
+   重建后回填到段落，使 `location.source_path` 指回原章节；并在 `limits` 声明格式损失；
 4. **七族巡检**（见 `references/consistency-rules.md`）：terminology / symbol / definition /
    numbering / reference / citation / conclusion；
-5. **最小侵入修订**：仅 `auto_fixable` 条目（拉丁术语变体升格、工单显式术语）在原地改命中 run；
+5. **修订**：先执行工单 `find/replace` 形式的显式改稿目标（逐条回报 `applied/not_found`），
+   再对 `auto_fixable` 条目（拉丁术语变体升格、工单显式术语）在原地改命中 run；
+   同段同词同目标的重复命中只执行一次并记入 `deduped_edits`，不再静默丢弃；
 6. **独立复核**：重新打开产物，校验可解析、段落数不变、未命中段落逐字未变、每处编辑确实落地；
+   并输出 `edit_impact`：同一旧写法还残留在哪些段落（供作者继续跟进）；
 7. **预览**：优先 `soffice --headless` 转 PDF 并校验 `%PDF` 与页对象；失败则写 `preview.html` 并记录原因；
 8. **交付**：写 `result.json` / `revision.docx` / `revision.md` / `revision.diff` /
    `inconsistencies.csv` / `consistency_report.md` / 预览。
@@ -106,11 +111,15 @@ anchor_quote     必须能在原稿该段逐字找到的引文
 
 | 情况 | 处理（已内置于 run_case） |
 |-|-|
-| `.doc`/RTF 伪装成 docx / zip 损坏 | 记 `unreadable` 与原因，继续处理其余材料；全部不可读则 `failed` |
+| `.doc`/RTF 伪装成 docx / zip 损坏 | 记 `unreadable` 与原因（只保留文件名，不写绝对路径），继续处理其余材料；全部不可读则 `failed` |
+| md/txt 非 UTF-8（如 GBK） | 依次尝试 UTF-8/GB18030/UTF-16；回退时写 `sources[].encoding` 与 `uncertainty`，不静默产出空串/乱码 |
+| case.json 未声明 `output_contract` | 仍按内置字段集输出，`self_check.contract_declared=false`，并在 `uncertainty`/`limits` 说明无法核对字段清单 |
 | PDF 无文本层 | 如实报"需要 OCR"，不根据图注猜测正文 |
 | 多份 md 合并 | 重建为单一 docx，保留标题层级/正文/表格顺序；`limits` 声明不保留分页/页眉页脚 |
+| 多个来源同名（如两处 chapter1.md） | 用相对路径作为来源标识，finding 仍能指回具体文件 |
 | 无标题/编号混乱 | 按段落聚类生成 `§A/§B`，诊断降为段落级 |
 | 符号定义位于表格单元格 | 用单元格段落号回填锚点，仍可逐字复核 |
+| 工单含 `find/replace`（或 old/new、before/after）目标 | 机械执行，逐条记 `workorder_execution`：`applied`（含段落/章节/出现次数）或 `not_found`（含检索范围），不做模糊匹配 |
 | 工单语义型指令（如"改写这段更严谨"） | 不自动改写，列入 `uncertainty`，交由模型/人工 |
 | 无 LibreOffice | 不谎报 PDF；写 `preview.html` 并在 `limits` 说明 |
 | 自动修订定位不到原文 | 记入 `skipped_edits`，不影响其余交付 |
@@ -129,4 +138,27 @@ anchor_quote     必须能在原稿该段逐字找到的引文
 ## 最小示例
 
 见 `examples/README.md`：`examples/synthetic_case/` 为**合成演示**（SYNTHETIC，非正式案例），
-含 3 章 md + 工单，可复现上述全部检查族与 2 处自动修订。
+含 3 章 md + 工单（术语表、语义型指令、1 条 find/replace 目标），可复现七族检查与 3 处自动修订。
+
+## 改动记录
+
+### 3.0.0（2026-11-25）
+
+- 修复：md/txt 非 UTF-8 时旧版 `read_text` 吞掉解码异常返回空串，导致 GBK 材料被误报
+  "PDF 无可提取文本层"；现按 UTF-8→GB18030→UTF-16 严格解码，回退写入 `sources[].encoding`
+  与 `uncertainty`。
+- 新增：解析并机械执行工单 `find/old/before + replace/new/after` 形式的显式改稿目标，
+  `result.json.workorder_execution` 逐条回报 `applied`（段落/章节/次数）或 `not_found`（检索范围）。
+  旧版会把这类 dict 当成自然语言指令，命中 `find` 字段后整条落入"语义型未落地"，目标从未执行。
+- 修复：同段同词同目标被多条规则命中时，旧版第二处被 `taken` 静默跳过、无任何记录；
+  现记入 `deduped_edits`。
+- 修复：多源合并后 `location.source_path` 一律为 `merged_base`，无法指回原章节；
+  现按 block 回填来源，同名文件用相对路径区分。
+- 修复：产物中写入运行环境绝对路径（`preview.pdf`、workorder 路径、错误信息）；
+  现统一为文件名/相对路径，错误信息经 `scrub_paths` 处理。
+- 修复：公式断号/编号重复的 `anchor_quote` 在编号为全角括号时退回段首 6 字（与结论不符）；
+  现锚点直接取编号本身。
+- 新增：`edit_impact` 列出"改了这处后同一旧写法还残留在哪些段落"，便于作者继续跟进。
+- 新增：`self_check.contract_declared`；case.json 未声明 `output_contract` 时在
+  `uncertainty/limits` 明示无法核对字段清单。
+- 打包：移除 `__pycache__`，示例命令统一使用绝对 `SKILL_DIR`，可在任意 cwd 执行。

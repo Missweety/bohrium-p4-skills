@@ -1,8 +1,16 @@
 {
-  "_note": "SYNTHETIC：模拟运行时 organizer-edit-workorder.json，演示“工单显式术语”如何被机械落地。",
+  "_note": "SYNTHETIC：模拟运行时 organizer-edit-workorder.json，演示“工单显式术语”与 find/replace 目标如何被机械落地。",
   "canonical_terms": {
     "卷积网络": "卷积神经网络"
   },
+  "targets": [
+    {
+      "chapter": "2",
+      "find": "多头注意力",
+      "replace": "多头自注意力",
+      "reason": "术语统一（工单显式目标）"
+    }
+  ],
   "instructions": [
     "统一术语：“transformer”改为“Transformer”。",
     "检查第2章图表引用是否存在悬空引用。"

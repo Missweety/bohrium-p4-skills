@@ -129,6 +129,26 @@ def sanitize_text(text):
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(text))
 
 
+HEADING_NUMBER_PATTERNS = (
+    r"^\s*\d+(?:\.\d+)*[\.、]?\s+",
+    r"^\s*第[一二三四五六七八九十百零〇]+[章节篇]\s*",
+    r"^\s*[一二三四五六七八九十百零〇]+[、.．]\s*",
+    r"^\s*[（(][一二三四五六七八九十百零〇]+[）)]\s*",
+)
+
+
+def strip_heading_number(text):
+    """Remove a literal section number that would duplicate numbering.xml."""
+    if not text:
+        return text
+    if re.match(r"^\s*(?:19|20)\d{2}\s", text):
+        return text
+    out = text
+    for pattern in HEADING_NUMBER_PATTERNS:
+        out = re.sub(pattern, "", out, count=1)
+    return out
+
+
 def xml_escape(text, attr=False):
     if text is None:
         return ""

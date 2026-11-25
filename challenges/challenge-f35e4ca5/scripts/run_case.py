@@ -446,36 +446,72 @@ def _run(input_dir, out_dir, work_dir, result_path, case, case_path, case_ok,
     primary = pick_primary(case, input_dir, buckets["documents"])
     aux = load_aux(buckets["aux"], input_dir)
 
-    # ---------- 无材料：诚实降级，不编造 ----------
-    if not buckets["documents"]:
-        reason = ("no readable document in %s (documents=%d images=%d aux=%d)"
-                  % (input_dir, len(buckets["documents"]), len(buckets["images"]),
-                     len(buckets["aux"])))
-        result = contract_map.empty_result(case_id, contract, reason)
-        result["uncertainty"]["notes"].append(
-            "materials listed in case.json: %s" % json.dumps(
-                case.get("materials", []), ensure_ascii=False)[:400])
-        emit(result)
-        sys.stderr.write("[run_case] %s\n" % reason)
-        return 0
-
-    # ---------- 抽取 ----------
+    # ---------- 无正文材料：登记图片/表格，诚实降级，不编造 ----------
     import doc_extract
     doc = {}
     doc_path = None
     extract_error = None
-    try:
-        doc = doc_extract.build_doc(primary, os.path.join(work_dir, "_extract"))
+    if not buckets["documents"] or primary is None:
+        doc = {
+            "meta": {"tool": "file-inventory", "tier": "no-text-document",
+                     "chars": 0, "pages": 0, "source_file": None,
+                     "note": "输入没有可解析的正文文档；只登记图片与表格文件的元数据"},
+            "pages": [{"page": 1, "chars": 0}], "units": [], "numbers": [],
+            "tables": [],
+            "captions": [], "figures": [], "axes": [], "images": [], "text": "",
+        }
+        for img in buckets["images"]:
+            doc["images"].append(doc_extract.probe_image(img))
+        for f in buckets["aux"]:
+            if os.path.splitext(f)[1].lower() in (".csv", ".tsv", ".xlsx"):
+                tables, diags = doc_extract.load_tabular(
+                    f, os.path.basename(f), len(doc["tables"]) + 1)
+                doc["tables"].extend(tables)
+                doc["text"] = (doc.get("text") or "") + "\n" + "\n".join(
+                    t.get("header_quote", "") + "\n" +
+                    "\n".join(r.get("row_quote", "") for r in t.get("rows") or [])
+                    for t in tables)
+                doc["meta"].setdefault("diagnostics", []).extend(diags)
         doc_path = os.path.join(work_dir, "doc.json")
         with open(doc_path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        extract_error = str(exc)
-        sys.stderr.write("[run_case] extraction failed: %s\n" % traceback.format_exc()[-800:])
+        sys.stderr.write("[run_case] no text document; images=%d tables=%d\n"
+                         % (len(doc["images"]), len(doc["tables"])))
+    else:
+        # ---------- 抽取 ----------
+        try:
+            doc = doc_extract.build_doc(primary, os.path.join(work_dir, "_extract"))
+        except Exception as exc:  # noqa: BLE001
+            extract_error = str(exc)
+            sys.stderr.write("[run_case] extraction failed: %s\n" % traceback.format_exc()[-800:])
+            doc = {}
+
+        if doc:
+            # 图片与外部表格（CSV/TSV/XLSX）不依赖正文，单独登记
+            doc.setdefault("images", [])
+            for img in buckets["images"]:
+                doc["images"].append(doc_extract.probe_image(img))
+            for f in buckets["aux"]:
+                if os.path.splitext(f)[1].lower() in (".csv", ".tsv", ".xlsx"):
+                    tables, diags = doc_extract.load_tabular(
+                        f, os.path.basename(f), len(doc["tables"]) + 1)
+                    doc["tables"].extend(tables)
+                    doc["text"] = (doc.get("text") or "") + "\n" + "\n".join(
+                        t.get("header_quote", "") + "\n" +
+                        "\n".join(r.get("row_quote", "") for r in t.get("rows") or [])
+                        for t in tables)
+                    doc["meta"].setdefault("diagnostics", []).extend(diags)
+            doc_path = os.path.join(work_dir, "doc.json")
+            with open(doc_path, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, ensure_ascii=False)
 
     if not doc:
-        reason = "document extraction failed: %s" % (extract_error or "empty document")
+        reason = "document extraction failed: %s" % (
+            extract_error or "empty document or no readable material")
         result = contract_map.empty_result(case_id, contract, reason)
+        result["uncertainty"]["notes"].append(
+            "images=%d tables_from_files=%d; 未从材料取得可解析文本"
+            % (len(buckets["images"]), len(buckets["aux"])))
         emit(result)
         return 0
 
@@ -525,7 +561,10 @@ def _run(input_dir, out_dir, work_dir, result_path, case, case_path, case_ok,
         result["coverage"]["extraction"] = doc.get("meta", {})
 
     # ---------- 补齐边界三件套（sources / uncertainty / change_log）----------
-    src_name = doc.get("meta", {}).get("source_file") or os.path.basename(primary)
+    src_name = (doc.get("meta", {}).get("source_file")
+                or (os.path.basename(primary) if primary else None)
+                or ((doc.get("images") or [{}])[0].get("file"))
+                or "materials")
     tier = doc.get("meta", {}).get("tier", "unknown")
     reported = [r for r in rows if r.get("status") == "reported"]
     not_reported = [r for r in rows if r.get("status") == "not_reported"]
@@ -547,6 +586,10 @@ def _run(input_dir, out_dir, work_dir, result_path, case, case_path, case_ok,
         })
     if not sources:
         sources.append({"file": src_name, "locator": "doc", "fields": [], "tier": tier})
+    for img in doc.get("images") or []:
+        sources.append({"file": img.get("file"), "locator": "image_metadata",
+                        "fields": [], "tier": tier,
+                        "note": "图片仅登记元数据，像素读数未执行"})
     result["sources"] = sources
 
     notes = []
@@ -600,7 +643,21 @@ def _run(input_dir, out_dir, work_dir, result_path, case, case_path, case_ok,
     report = run_audit(result_path, case_path if case_ok else None, doc_path, work_dir)
     result["audit"] = report
     unresolved = result.get("uncertainty", {}).get("unresolved", [])
-    if report["pass"] and not unresolved:
+    images = doc.get("images") or []
+    table_count = len(doc.get("tables") or [])
+    has_text = bool(doc.get("pages")) and bool((doc.get("meta") or {}).get("chars"))
+    if (tier == "unreadable" or (not has_text and not table_count)) \
+            and not images and not table_count:
+        # 材料存在但读不出任何可复核内容：不能报 success
+        result["status"] = "failed"
+        result["uncertainty"]["notes"].append(
+            "材料未提供可解析文本层，也没有可登记的表格/图片，按 failed 处理并说明人工接管位置")
+    elif images and not has_text:
+        result["status"] = "partial"
+        result["uncertainty"]["notes"].append(
+            "仅登记了 %d 张图片的元数据；像素刻度/图例/数据点读数未执行，相关字段列为缺口"
+            % len(images))
+    elif report["pass"] and not unresolved:
         result["status"] = "success"
     elif unresolved or report.get("errors"):
         result["status"] = "partial"

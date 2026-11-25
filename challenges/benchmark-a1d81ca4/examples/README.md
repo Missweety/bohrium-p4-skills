@@ -11,9 +11,11 @@
 ## 调用
 
 ```bash
-python3 scripts/run_bench.py --input examples/synthetic --out /tmp/out --work /tmp/work
-python3 scripts/selfcheck.py --input examples/synthetic --out /tmp/out --work /tmp/work
+python3 "$SKILL_DIR/scripts/run_bench.py" --input "$SKILL_DIR/examples/synthetic" --out /tmp/out --work /tmp/work
+python3 "$SKILL_DIR/scripts/selfcheck.py" --input "$SKILL_DIR/examples/synthetic" --out /tmp/out --work /tmp/work
 ```
+
+脚本按自身绝对路径导入模块，可在任意 cwd 执行；平台上 `SKILL_DIR=/skills/weekly-skill`。
 
 ## 预期（实测输出，示意）
 
@@ -26,7 +28,7 @@ python3 scripts/selfcheck.py --input examples/synthetic --out /tmp/out --work /t
  "extractive": 0.5,
  "naive": 0.0
 }
-PASS selfcheck: 25 checks, 0 failed
+PASS selfcheck: 26 checks, 0 failed
 ```
 
 4 道题的实际形态（示意，非正式答案）：
@@ -44,3 +46,4 @@ PASS selfcheck: 25 checks, 0 failed
 
 - 示例目录只放 `case.json`、`task.md`、`materials.md` 三个文件；额外文件会被当成材料一起读入。
 - 想复现异常路径：给 `--input` 一个空目录，会得到 `status=failed`、退出码 1、`uncertainty` 写明缺 `case.json`。
+- 2.1.0 回归：同一表格行生成两题时，旧版切分会静默丢掉一题且 `split_disjoint=false`；现改为整单元同侧、不丢题（`/tmp` 合成案例实测 4 题、dev 1/test 3、五项检查全通过）。

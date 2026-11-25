@@ -108,9 +108,17 @@ def resolve_sources(explicit, out_dir, case_path, result):
     if explicit:
         candidates.append(explicit)
     recorded = ((result or {}).get("build") or {}).get("sources_path")
+    hint = ((result or {}).get("build") or {}).get("sources_dirname")
+    out_abs = os.path.abspath(out_dir)
+    if recorded and not os.path.isabs(recorded):
+        # result.json 只存文件名（不写绝对路径），按常见布局还原
+        if hint:
+            candidates.append(os.path.join(os.path.dirname(out_abs), hint, recorded))
+            candidates.append(os.path.join(out_abs, "..", hint, recorded))
+        candidates.append(os.path.join(os.path.dirname(out_abs), "work", recorded))
+        candidates.append(os.path.join(out_abs, recorded))
     if recorded:
         candidates.append(recorded)
-    out_abs = os.path.abspath(out_dir)
     candidates.append(os.path.join(out_abs, "sources.json"))
     candidates.append(os.path.join(os.path.dirname(out_abs), "work", "sources.json"))
     candidates.append(out_abs.rstrip(os.sep) + "_work" + os.sep + "sources.json")
@@ -155,9 +163,11 @@ def check(out_dir, case_path, sources_path):
     case_id = common.case_id_of(case, os.path.dirname(case_path) if case_path else None)
     if not result.get("case_id"):
         problems.append("result.case_id missing")
-    elif case and str(result["case_id"]) != str(common.case_id_of(case, None)):
+    elif case and str(result["case_id"]) != str(case_id):
+        # 旧版这里传 None，case.json 非法时 case_id_of 返回占位值 "case"，
+        # 导致 case_id 明明按目录名兜底却被误判为不一致。
         problems.append("result.case_id %r != case.json case_id %r"
-                        % (result.get("case_id"), common.case_id_of(case, None)))
+                        % (result.get("case_id"), case_id))
     for name in missing_fields:
         problems.append("output_contract field missing: %s" % name)
     info["contract_fields"] = len(fields)
@@ -216,7 +226,10 @@ def check(out_dir, case_path, sources_path):
     # ---- evidence -----------------------------------------------------
     claims = result.get("evidence") or []
     if not claims:
-        problems.append("result.evidence is empty")
+        if status == "failed":
+            warnings.append("status=failed (no readable material): evidence is empty by design")
+        else:
+            problems.append("result.evidence is empty")
     reported = [c for c in claims if c.get("status") == "reported"]
     for claim in reported:
         if not claim.get("verified"):
@@ -250,7 +263,12 @@ def check(out_dir, case_path, sources_path):
         problems.append("research question count is %d; must be 1-3" % len(questions))
     alignment = result.get("alignment") or {}
     if alignment.get("status") != "pass":
-        problems.append("alignment gaps: %s" % "；".join(alignment.get("gaps", [])))
+        blocked = set(alignment.get("blocked_gaps") or [])
+        for gap in alignment.get("gaps", []) or ["(no gap detail)"]:
+            if gap in blocked:
+                warnings.append("alignment gap attributable to missing input: %s" % gap)
+            else:
+                problems.append("alignment gaps: %s" % gap)
     schedule = result.get("schedule") or {}
     milestones = schedule.get("milestones") or []
     period = (result.get("constraints") or {}).get("period_months") or {}

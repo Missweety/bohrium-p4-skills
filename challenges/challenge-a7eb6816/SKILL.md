@@ -1,5 +1,6 @@
 ---
 name: research-output-transform
+version: 2.0
 description: 科研成果转化写作。把论文摘要、技术报告、实验结果改写成面向另一类读者/体裁的稿子（论文摘要→公众科普、技术报告→项目申报、成果→新闻稿/政策简报/执行摘要），逐条保留结论、关键数字、范围与局限、术语和引用含义；用锚点核验引文与数值来源，登记删除项，标出不可直译术语、遗漏与源文冲突，产出 transform.md、preservation_map.csv、glossary.csv、result.json。
 ---
 
@@ -25,19 +26,21 @@ description: 科研成果转化写作。把论文摘要、技术报告、实验�
 
 ## 三条命令（固定流程）
 
-在部署目录（下称 `$SKILL`，通常为 `/skills/weekly-skill`）执行：
+在部署目录（下称 `$SKILL_DIR`，通常为 `/skills/weekly-skill`）执行。先设成绝对路径，任意 cwd 下都能跑：
 
 ```bash
+SKILL_DIR="${SKILL_DIR:-/skills/weekly-skill}"
+
 # 1) 抽取：跳过 case.json / task.md，按 doc.N p.N sec.N para.K 建锚点
-python3 $SKILL/scripts/extract_sources.py --input /input --out /app/work/sources.json
+python3 "$SKILL_DIR/scripts/extract_sources.py" --input /input --out /app/work/sources.json
 
 # 2) 生成：读取你写的 plan.json，产出并核验
-python3 $SKILL/scripts/build_transform.py \
+python3 "$SKILL_DIR/scripts/build_transform.py" \
   --plan /app/work/plan.json --sources /app/work/sources.json \
   --case /input/case.json --out /app/output --work /app/work
 
 # 3) 自检：独立复算，有硬错误则非零退出
-python3 $SKILL/scripts/selfcheck.py \
+python3 "$SKILL_DIR/scripts/selfcheck.py" \
   --case /input/case.json --out /app/output --sources /app/work/sources.json
 ```
 
@@ -149,7 +152,7 @@ python3 $SKILL/scripts/selfcheck.py \
 | 编造经历/引语 | `fabricated_experience` / `fabricated_quote`（error） | 删除；只保留源文可核验的引语（必要时登记 `quoted_material`） |
 | 术语缺解释 | `glossary_not_expanded` / `unglossed_jargon`（error，非专业读者） | 首次出现处加括号解释；或 `replace` 成日常说法 |
 | 篇幅超限 | 超上限 110% 为 error，略超为 warn | 删重复背景或方法细节；优先保留结论、数字、局限 |
-| 空输入/无文本层 PDF | `extract_sources.py` 退出码 2；`build_transform` 写 failed 说明 | 不要编造内容；在 result 中如实说明无法读取的文件 |
+| 空输入/无文本层 PDF | `extract_sources.py` 退出码 2；`build_transform` 记 `no_readable_sources`(error)，`status=failed`，`transform.md` 顶部加“未核验、不可发布”横幅 | 不要编造内容；在 result 中如实说明无法读取的文件 |
 | `output_contract` 缺失/自定义键 | 缺契约时警告；自定义键从 `plan.contract_fields` 或同名 plan 字段取值 | 在 `plan.contract_fields` 显式补齐 |
 | 计划缺失/正文为空 | `status=failed`，写失败说明，不写假文章 | 补 plan 或补 `sections.paragraphs` |
 | 篇幅目标为字符串 | 取第一个数字作 `max_words`，并视为上限 | 尽量写成 `{"max_words": N}` 的对象 |
@@ -158,7 +161,7 @@ python3 $SKILL/scripts/selfcheck.py \
 
 - `success` 仅当：无 error 级 issue、全部 claim 引文通过、全部数字可追溯、无未登记遗漏、无源文冲突待判、篇幅在上限 110% 以内、无占位符、契约键齐全。
 - `partial`：仍产出完整可编辑稿，但存在上述任一问题。必须在 `issues` 说明原因，把需要人判断的事项写入 `uncertainty`，并在 `status_reason` 写清楚。**不要把 partial 改成 success。**
-- `failed`：没有可读来源、plan 缺失、或正文为空。`transform.md` 只写简短失败说明，`result.json` 保留契约字段与失败原因；不生成占位正文。
+- `failed`：没有任何可读源文（`no_readable_sources`）、plan 缺失、或正文为空。没有可读源文时仍写出 `transform.md` 与契约字段，但正文首行带有 `> 状态：failed。…均为未核验…` 横幅，`status_reason` 说明原因；不把草稿当作可发布成稿。plan 缺失/正文为空时 `transform.md` 只写简短失败说明，不生成占位正文。
 - 三种状态都要留下 `change_log`，说明读了哪些来源、做了哪些核验、为什么是这个状态。
 
 ## 交付物
@@ -179,3 +182,14 @@ python3 $SKILL/scripts/selfcheck.py \
 - 扫描版 PDF 无文本层时无法可靠抽取，只能如实报告；可请任务方提供文本版。
 - 中文/英文混合文本的句长、词数为近似统计，用于相对比较，不作为语言学结论。
 - 内置体裁模板是写作检查清单，不是期刊/基金委的官方格式；以任务给出的格式要求为准。
+
+## 改动记录
+
+- **v2.0（2026-11-25）**
+  - 修复契约键解析：`title` / `audience` / `genre` / `target_length` 之前被当成顶层字段读取而恒为 `null`，导致 `result.json` 契约字段为空、`selfcheck` 硬失败；现改为从 `result.transform` 取值。
+  - 无任何可读源文时改为 `status=failed`（`no_readable_sources` error），并在 `transform.md` 顶部写“未核验、不可发布”横幅，与本文档规则一致；此前会输出 `partial` 的未核验文章。
+  - 新增 `appendix_number_unsupported`（warn）：术语附录不属于篇幅统计，但出现在附录里的数值同样登记，避免数字绕过核验。
+  - 修复跨语言遗漏误判：`omission_unlogged_*` 之前只按源段落与正文的词面重合率判断，英文源 + 中文成稿时任何翻译段落都会被判“未保留”；现在额外接受“已核验且已定位、锚点指向该段落”的 claim，避免为合法译文强行编造删除登记。
+  - `selfcheck.py` 在 `status=failed` 时把 `sources_readable`、`numbers_traceable`、`preservation_map_nonempty`、`contract_keys_nonnull` 降为 warn，使诚实失败不再被判成“产物损坏”。
+  - `examples/` 新增可直接运行的合成夹具与真实复现输出；`GITHUB_URL.txt` 指向正确的 challenge 目录，包根同步一份。
+  - 文档命令统一 `python3`，脚本路径改用绝对 `$SKILL_DIR`。

@@ -94,9 +94,9 @@ def parse_pages(raw, engine):
     return [raw]
 
 
-def extract_file(path, doc_no):
+def extract_file(path, doc_no, input_root="/input"):
     ext = os.path.splitext(path)[1].lower()
-    rec = {"doc": "doc.%d" % doc_no, "path": os.path.relpath(path, "/input"),
+    rec = {"doc": "doc.%d" % doc_no, "path": os.path.relpath(path, input_root),
            "bytes": os.path.getsize(path), "sha256": sha256(path),
            "readable": False, "engine": None, "pages": [], "paragraphs": []}
     if ext == ".pdf":
@@ -169,7 +169,7 @@ def main():
             }:
                 continue
             doc_no += 1
-            docs.append(extract_file(path, doc_no))
+            docs.append(extract_file(path, doc_no, a.input))
     payload = {
         "input_root": a.input,
         "documents": docs,

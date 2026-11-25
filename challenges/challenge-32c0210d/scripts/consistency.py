@@ -532,10 +532,9 @@ class Analyzer:
                for p in self.ps for m in [EQ_TAG.search(p["text"])] if m]
         for n, cnt in Counter(n for n, _, _ in eqs).items():
             if cnt > 1:
-                p = next(q for x, q, _ in eqs if x == n)
-                off = p["text"].find(n)
+                p, start = next((q, s) for x, q, s in eqs if x == n)
                 self.add("numbering.equation_duplicate", "numbering", "medium", "high",
-                         self.loc(p, off, off + len(n)),
+                         self.loc(p, start, min(len(p["text"]), start + len(n))),
                          "公式编号 (%s) 重复" % n, "公式编号必须唯一，否则无法被引用。",
                          needs_manual=True)
         by_pre = defaultdict(list)
@@ -547,10 +546,10 @@ class Analyzer:
                 continue
             miss = [i for i in range(min(arr), max(arr) + 1) if i not in arr]
             if miss:
-                p = next(q for x, q, _ in eqs if x.startswith(pre + "-"))
-                off = p["text"].find("(")
+                # 锚点落在编号本身（旧版用 text.find("(")，全角括号时退回段首，引文与结论不符）
+                n0, p, start = next((x, q, s) for x, q, s in eqs if x.startswith(pre + "-"))
                 self.add("numbering.equation_gap", "numbering", "low", "high",
-                         self.loc(p, max(0, off), max(0, off) + 6),
+                         self.loc(p, start, min(len(p["text"]), start + len(n0))),
                          "公式编号（%s-*）不连续，缺 %s" % (pre, ", ".join(map(str, miss))),
                          "断号可能来自删公式后未重排。", needs_manual=True)
 

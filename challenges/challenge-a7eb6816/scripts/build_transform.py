@@ -707,7 +707,22 @@ def removal_matches(removal, para):
     return False
 
 
-def check_omissions(paragraphs, body, removals, issues):
+def _anchor_covered(anchor, covered):
+    for a in covered:
+        if not a:
+            continue
+        if anchor == a or anchor.startswith(a) or a.startswith(anchor):
+            return True
+    return False
+
+
+def check_omissions(paragraphs, body, removals, issues, claims=None):
+    # Coverage is lexical overlap OR an explicit, located claim anchored to the
+    # paragraph.  Lexical overlap alone is meaningless for cross-language
+    # rewrites (English source, Chinese output), where every translated
+    # paragraph would look "omitted".
+    covered = {c.get("anchor") for c in (claims or [])
+               if c.get("verified") and c.get("output_location") and c.get("anchor")}
     body_tokens = tokens(body)
     rows = []
     for p in paragraphs:
@@ -718,7 +733,7 @@ def check_omissions(paragraphs, body, removals, issues):
                                              text, re.I):
             continue
         cov = overlap(body_tokens, tokens(text))
-        if cov >= 0.12:
+        if cov >= 0.12 or _anchor_covered(p["anchor"], covered):
             continue
         logged = any(removal_matches(r, p) for r in removals)
         has_num = bool(number_tokens(text))
@@ -1095,9 +1110,13 @@ def resolve_contract_value(name, slot, result, plan, transform_text):
         return ("正文 %s 字符、%s 词；平均句长 %s 字符；术语密度 %s/千字符"
                 % (m.get("chars"), m.get("words"), m.get("avg_sentence_chars"),
                    m.get("jargon_per_1000_chars")))
+    if slot in ("title", "genre", "audience", "target_length"):
+        # These live under result["transform"], not at the top level; returning
+        # result.get(slot) here used to yield null and break the contract.
+        tr = result.get("transform") or {}
+        return tr.get(slot)
     if slot in ("metrics", "sources", "uncertainty", "change_log", "issues",
-                "deliverables", "status", "case_id", "title", "audience",
-                "genre", "target_length"):
+                "deliverables", "status", "case_id"):
         return result.get(slot)
     if name in result:
         return result[name]
@@ -1120,9 +1139,12 @@ def run(args):
     sources, docs, paragraphs, full_text, src_numbers = load_sources(args.sources)
     case = load_json(args.case, {}) or {}
     case_id = str(case.get("case_id") or case.get("id") or plan.get("case_id") or "unknown")
-    if not docs:
+    no_sources = not paragraphs
+    if no_sources:
         issues.append(issue("no_readable_sources", "error",
-                            "sources.json 中没有可读文档，无法核对事实与数值", args.sources))
+                            "sources.json 中没有可读段落（%d 个文档），无法核对事实与数值；"
+                            "本次按 failed 交付，不把未经核验的正文当作可用结果" % len(docs),
+                            args.sources))
 
     audience = norm_audience(plan.get("audience"))
     genre, genre_supported = norm_genre(plan.get("genre"))
@@ -1147,6 +1169,9 @@ def run(args):
     sections = norm_sections(plan, claims)
     title = str(plan.get("title") or source_title(paragraphs)).strip()
     transform_text, appendix = compose_markdown(plan, sections, glossary, title)
+    if no_sources:
+        transform_text = ("> 状态：failed。本次运行没有任何可读源文，下列内容仅为计划草稿，"
+                          "事实、数值与引文均未核验，不得当作可发布成稿。\n\n" + transform_text)
     body_text, _appendix_text = split_body(transform_text)
     paras = body_paragraphs(sections)
 
@@ -1199,6 +1224,17 @@ def run(args):
                              "basis": str(d.get("basis") or d.get("derivation") or "").strip(),
                              "anchor": str(d.get("anchor") or "").strip()})
     numbers = check_numbers(body_text, src_numbers, declared, issues, paragraphs)
+    # The glossary appendix is part of transform.md but outside the length window;
+    # numbers introduced there are still reported (warn) so nothing slips by.
+    src_digits_all = {digits_of(t) for t in src_numbers}
+    declared_digits = {digits_of(d["value"]) for d in declared}
+    for token in sorted(set(body_numbers(transform_text[len(body_text):]))):
+        digits = digits_of(token)
+        if not digits or token in src_numbers or digits in src_digits_all or digits in declared_digits:
+            continue
+        issues.append(issue("appendix_number_unsupported", "warn",
+                            "术语附录中的数值「%s」未在源文出现，也未在 plan.numbers 给出依据"
+                            % token, "transform.md"))
 
     # glossary / jargon
     jargon_occ, unglossed = check_glossary(body_text, transform_text, glossary, lay, issues)
@@ -1217,7 +1253,7 @@ def run(args):
             uncertainty.append({"issue": "高风险删除：%s" % (r["removed"] or r["source_anchor"]),
                                 "decision": "已记录理由，需作者确认",
                                 "needs_human": True})
-    omissions = check_omissions(paragraphs, body_text, removals, issues)
+    omissions = check_omissions(paragraphs, body_text, removals, issues, claims)
     limits = check_limitations(paragraphs, claims, removals, body_text, issues)
     conflicts = detect_conflicts(paragraphs)
     for c in conflicts:
@@ -1270,6 +1306,10 @@ def run(args):
     if not has_body:
         status = "failed"
         status_reason = "正文为空：plan.json 未提供 sections.paragraphs 或 claim_evidence.output_text"
+    elif no_sources:
+        status = "failed"
+        status_reason = ("没有任何可读源文，无法核对事实、数值与引文；"
+                         "草稿已标注为不可发布，需先提供可读材料")
     elif errors or conflicts or unlogged_n:
         status = "partial"
         reasons = []

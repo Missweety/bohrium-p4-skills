@@ -1,0 +1,8 @@
+{
+  "_note": "示例输入（合成）。真实案例由平台在评测时提供，参赛者不自带正式案例。",
+  "case_id": "synthetic-figure-1",
+  "output_contract": {
+    "required": ["parsed", "evidence", "coverage", "status"]
+  },
+  "materials": ["paper.md", "table_dose.csv", "target-fields.json"]
+}

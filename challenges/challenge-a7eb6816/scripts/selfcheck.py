@@ -244,6 +244,7 @@ def main(argv=None):
     case = load_json(args.case, {}) or {}
     if not isinstance(case, dict):
         case = {}
+    failed_run = result.get("status") == "failed"
 
     # --- files
     transform_path = os.path.join(out, "transform.md")
@@ -267,7 +268,8 @@ def main(argv=None):
         chk.add("contract_keys_present", not missing,
                 "契约键齐全" if not missing else "result.json 缺少契约键：%s" % ", ".join(missing))
         chk.add("contract_keys_nonnull", not nulls,
-                "契约键均非 null" if not nulls else "契约键为 null：%s" % ", ".join(nulls))
+                "契约键均非 null" if not nulls else "契约键为 null：%s" % ", ".join(nulls),
+                severity="warn" if failed_run else "hard")
         cf = result.get("contract_fields")
         chk.add("contract_fields_object", isinstance(cf, dict), "contract_fields 为对象")
         if isinstance(cf, dict):
@@ -289,7 +291,8 @@ def main(argv=None):
     src_data, paragraphs, full_text = load_sources(args.sources)
     chk.add("sources_readable", bool(paragraphs),
             "sources.json 含 %d 个段落" % len(paragraphs) if paragraphs
-            else "sources.json 缺失或无段落，无法核对")
+            else "sources.json 缺失或无段落，无法核对",
+            severity="warn" if failed_run else "hard")
     full_sq = squash(full_text)
     src_numbers = set(number_tokens(full_text))
     src_digits = {digits_of(t) for t in src_numbers}
@@ -337,7 +340,8 @@ def main(argv=None):
                 status_lies.append(token)
     chk.add("numbers_traceable", not unsupported,
             "正文 %d 个数值均可在源文或推导依据中找到" % len(out_tokens) if not unsupported
-            else "无来源数值：%s" % ", ".join(sorted(set(unsupported))))
+            else "无来源数值：%s" % ", ".join(sorted(set(unsupported))),
+            severity="warn" if failed_run else "hard")
     chk.add("numbers_status_truthful", not status_lies,
             "result.numbers 的 verbatim 标记与源文一致" if not status_lies
             else "被标为 verbatim 但源文无此数：%s" % ", ".join(sorted(set(status_lies))))
@@ -391,7 +395,8 @@ def main(argv=None):
                 severity="hard" if declared_rate > rate + 0.01 else "warn")
     chk.add("preservation_map_nonempty", bool(rows),
             "preservation_map 含 %d 条 claim" % len(rows) if rows
-            else "preservation_map 为空：正文没有可回溯的事实映射")
+            else "preservation_map 为空：正文没有可回溯的事实映射",
+            severity="warn" if failed_run else "hard")
 
     # --- removals / omissions
     removals = result.get("removals") if isinstance(result.get("removals"), list) else []

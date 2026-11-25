@@ -1,0 +1,9 @@
+{
+  "case_id": "synthetic-lib-1",
+  "color_legend": {"#ffd400": "待验证"},
+  "search_questions": [{"query": "待验证", "tag": "待验证"}, {"query": "replication"}],
+  "entities": ["assay", "replication"],
+  "output_contract": {
+    "required": ["case_id", "status", "annotations", "anchor_quality", "notes", "links", "search_results"]
+  }
+}

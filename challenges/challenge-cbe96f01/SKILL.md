@@ -5,7 +5,7 @@ description: 逐条核验论文事实与引用支持，绑定稿件和来源原�
 
 # 引用与事实核验
 
-版本 1.2.0
+版本 1.3.0
 
 ## 三种调用请求
 
@@ -33,20 +33,24 @@ description: 逐条核验论文事实与引用支持，绑定稿件和来源原�
 
 Python 3.10+，无必装 Python 第三方包。PDF 文本抽取使用已有 pdftotext，DOCX 用标准库，扫描页按现场工具渲染或 OCR 并核对数字。依赖不可用时记录具体文件、页和限制。读完整 /input/case.json、任务和 environment/resources.yaml（存在时），从实际声明找到稿件、被引原文、补充材料和数据。清单相对路径从清单目录解析。正式案例只在运行时取得。
 
-用实际材料目录生成证据索引与待填审查单。初次命令产出的是输入证据和检查模板，随后由 Agent 阅读原文并写出本题科学判断。`prepare` 已按真实段落自动预填三类候选，一律标注“需语义确认”，Agent 必须保留、修正或说明不采纳的理由，不能把候选数量当作结论数量：
+用实际材料目录生成证据索引与待填审查单。`prepare` 把机器线索单独写入 `review-template.json` 的 `candidates`，**不会**写入 `findings`；候选只是定位提示，不是结论，也不得原样提交：
 
-- 引用类：正文 [n] 缺失对应书目条目、或完全无可解析书目。
-- 数值类：同段自称显著但 p≥0.05；同一来源出现多个样本量 n；同段互斥百分比合计超过 100%。
-- 来源类：出现撤稿、勘误/更正或预印本标识，需核对出版状态与版本差异。
+- 引用类：仅在书目编号可机械解析时列未匹配编号（最多 5 条）；书目为作者-年份或非方括号编号时只给一条 informational 提示，不得据此判条目缺失；材料无参考文献区（可能为节选）时同样只提示，不定性。
+- 数值类：同句自称显著但 p>0.05；同一来源出现多个样本量 n；同一句三个以上百分比合计超过 100%。
+- 来源类：正文（不含书目）出现撤稿、勘误/更正或预印本标识，需核对出版状态与版本差异。
+
+Agent 核对原文后，把确认成立的线索改写为新 id 和自有 basis 再放进 `findings`，不采纳的线索丢弃；保留“需语义确认”字样或 AUTO-CIT-/CIT-/NUM-/SOURCE-META- 前缀的条目会被 render 和 selfcheck 拒绝。命令在任意 cwd 可用；本地运行时把 `/skills/weekly-skill` 换成 `$SKILL_DIR`：
 
 ```sh
 python3 /skills/weekly-skill/scripts/audit.py prepare --input /input --out /app/work/audit
-# 阅读 source-index.md 与原图，核对自动候选，填写 review-template.json 为 /app/work/reviewed.json
-python3 /skills/weekly-skill/scripts/audit.py render --evidence /app/work/audit/evidence.json --review /app/work/reviewed.json --out /app/output
+# 阅读 source-index.md 与原图，核对 candidates，填写 review-template.json 为 /app/work/reviewed.json
+python3 /skills/weekly-skill/scripts/audit.py render --evidence /app/work/audit/evidence.json --review /app/work/reviewed.json --case /input/case.json --out /app/output
 python3 /skills/weekly-skill/scripts/audit.py selfcheck --result /app/output/result.json --case /input/case.json --evidence /app/work/audit/evidence.json --out /app/work
 ```
 
-`selfcheck` 核验三件事：`result.json` 是否满足当前 `case.json` 的 `output_contract` 必填字段、每条 finding 的引文是否仍逐字存在于所引段落、六个 facet 是否都有覆盖记录；不通过时退出码为 1 并逐条列出原因。
+`prepare`/`render` 在状态为 `failed` 时退出码 1，其余为 0；`selfcheck` 不通过退出码 1。`render --case` 会把运行时 `output_contract` 中脚本原生未映射的字段保留为 `null` 并记入 `uncertainty`，避免字段被静默丢弃，交付前须由 Agent 补全。
+
+`selfcheck` 核验五件事：`result.json` 是否满足当前 `case.json` 的 `output_contract` 字段（含嵌套 `fields`/`required` 与列表写法）、每条 finding 的引文是否仍逐字存在于所引段落、六个 facet 是否都有覆盖记录、至少一个 facet 是否真的 `checked`、以及 `findings` 中是否残留未做语义确认的自动候选；`status=success` 时不允许仍有未查 facet。不通过时逐条列出原因。
 
 交付前做完整性自检：六个 facet 都要有 `checked`（带真实证据）或写明原因的 `not_checked` / `not_applicable` / `unable_to_determine`；每条 finding 的 quote 必须逐字出现在所引段落；`validation.json` 的 rejected 要逐条修正后再交。若案例材料只有摘要或缺正文，明确写缺哪一文件、哪一页，不能把未读内容标成 checked。
 
@@ -63,3 +67,4 @@ references/output-contract.md 说明接口；references/example-output.md 给出
 1.0.0 新建专项审查流程、双侧证据绑定、可读报告及异常回归。
 1.1.0 增加基于真实段落的引用候选预填（缺书目/缺编号），并在 SKILL 中固化六 facet 完整性与逐字引用自检，降低“输出不完整”的风险；不改变人工语义判定边界。
 1.2.0 增加数值一致性候选（显著性阈值、样本量冲突、互斥百分比超 100%）与来源状态候选（撤稿/勘误/预印本），新增 `selfcheck` 子命令按运行时 `output_contract`、逐字引文与六 facet 覆盖做交付前校验；所有自动候选仅作定位提示，语义判定仍由 Agent 完成。
+1.3.0 修复 1.1/1.2 预填候选直接进入 `findings` 导致的假阳性：`prepare` 改写到独立 `candidates`，书目改为整段/多行解析并识别作者-年份与非编号著录（缺编号不再报“条目缺失”），p 值按比较符判断（p<0.05 不误报），百分比限定同句三条以上；render/selfcheck 拒绝未确认候选；新增 GBK 兜底解码、嵌套 `output_contract` 识别、按契约保留未映射字段、失败退出码 1 与“至少一个 facet 真检查”校验。

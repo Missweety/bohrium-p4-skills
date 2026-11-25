@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - grade.py ships alongside
     canonical_unit = lambda u: (u or "").strip()
 
 NUM_UNIT_ALTERNATION = (
-    r"%|‰|wt%|vol%|°C|℃|mg|kg|µg|ug|ng|mL|ml|µL|uL|dL|L|mmol|µmol|umol|mol|"
+    r"%|‰|wt%|vol%|°C|℃|mg|kg|µg|ug|ng|g|mL|ml|µL|uL|dL|L|mmol|µmol|umol|mol|"
     r"mM|µM|uM|nM|kJ/mol|kJ|kcal/mol|MPa|kPa|Pa|bar|mm|cm|nm|km|m|"
     r"rpm|Hz|kHz|MHz|kV|V|mA|kW|W|min|mins|minute|minutes|h|hr|hrs|hour|hours|"
     r"s|sec|day|days|week|weeks|month|months|year|years|ppm|ppb|Da|kDa|mL/min|"
@@ -166,10 +166,10 @@ def _extract_workorder_block(task_text):
 def parse_workorder(case, task_text):
     raw, src = None, None
     for key in ("workorder", "work_order", "benchmark_draft", "benchmark_items",
-                "requests", "deliverables", "items", "tasks", "questions", "queries"):
+                "requests", "deliverables", "items", "tasks"):
         val = case.get(key)
         if val not in (None, "", [], {}):
-            if key in ("items", "tasks", "questions") and isinstance(val, list):
+            if key in ("items", "tasks") and isinstance(val, list):
                 if not any(_clause_text(x) for x in val):
                     continue
             raw, src = val, "case.%s" % key

@@ -1544,6 +1544,157 @@ def build_review_sheet(rows, max_chars=190):
     return sheet
 
 
+def _fnum(text):
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", text or "")
+    return float(m.group(0)) if m else None
+
+
+def _figure_row(field, status, value=None, quote=None, anchor=None,
+                unit=None, note="", confidence=0.8):
+    row = _row(field, status, "figure_structure", confidence)
+    row.update({"value": value, "quote": quote, "paragraph_id": anchor,
+                "unit": unit, "notes": note, "note": note})
+    row["review"] = {"by": "script", "confidence": confidence,
+                     "basis": note or "图表结构（坐标轴/表格/图注）直接取值"}
+    return row
+
+
+def _axis_figure_row(field, doc):
+    desc = (field.get("description") or "").lower()
+    if not re.search(r"axis|轴|坐标", desc):
+        return None
+    if not re.search(r"unit|单位|量纲|scale|type|log|linear|刻度|量级|类型|标签|label",
+                     desc):
+        return None
+    side = None
+    if re.search(r"\bx[\s_-]?axis\b|横轴|x\s*轴|x轴", desc):
+        side = "x"
+    elif re.search(r"\by[\s_-]?axis\b|纵轴|y\s*轴|y轴", desc):
+        side = "y"
+    if re.search(r"unit|单位|量纲", desc):
+        attr = "unit"
+    elif re.search(r"scale|type|log|linear|刻度|量级|类型", desc):
+        attr = "scale"
+    else:
+        attr = "label"
+    for ax in doc.get("axes") or []:
+        if side and str(ax.get("axis", "")).lower() != side:
+            continue
+        value = ax.get(attr)
+        if value in (None, "", "not_reported"):
+            continue
+        value = str(value)
+        quote = ax.get("quote") or ""
+        if value.lower() not in quote.lower():
+            continue
+        return _figure_row(
+            field, "reported", value, quote, ax.get("anchor"),
+            unit=ax.get("unit") if attr == "unit" else None,
+            note="从坐标轴文本声明取值（axis=%s, attr=%s）；未做像素刻度读数"
+                 % (ax.get("axis"), attr))
+    return None
+
+
+def _caption_sample_size(field, doc):
+    desc = (field.get("description") or "").lower()
+    if not re.search(r"sample size|\bn\b|样本量|重复数|动物数|细胞数|例子数", desc):
+        return None
+    for cap in doc.get("captions") or []:
+        if cap.get("n") is None:
+            continue
+        quote = cap.get("text") or ""
+        value = str(cap["n"])
+        if value not in quote:
+            continue
+        return _figure_row(field, "reported", value, quote, cap.get("anchor"),
+                           unit="n", note="图注/表注明确给出的样本量（逐字引文含 n = %s）" % value)
+    return None
+
+
+def _pick_header_index(header, desc):
+    if re.search(r"significan|显著性|\bp\s*value|p值|星号", desc):
+        want = "significance"
+    elif re.search(r"error|误差|s\.?e\.?m|s\.?d\.?|error bar", desc):
+        want = "error"
+    else:
+        want = None
+    if want:
+        for h in header:
+            if h.get("role") == want:
+                return h["index"] - 1
+    words = {w for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", desc)
+             if w.lower() not in ("the", "and", "for", "with", "value", "from")}
+    for h in header:
+        if h.get("role") == "x_axis":
+            continue
+        name = (h.get("name") or "").lower()
+        if any(w.lower() in name for w in words):
+            return h["index"] - 1
+    for h in header:
+        if h.get("role") == "y_axis":
+            return h["index"] - 1
+    return None
+
+
+def _table_figure_row(field, doc):
+    desc = field.get("description") or ""
+    low = desc.lower()
+    if not doc.get("tables"):
+        return None
+    target = _fnum(desc)
+    for t in doc["tables"]:
+        header = t.get("header") or []
+        rows = t.get("rows") or []
+        if not header or not rows:
+            continue
+        idx = _pick_header_index(header, low)
+        if idx is None:
+            continue
+        xidx = next((h["index"] - 1 for h in header if h.get("role") == "x_axis"), None)
+        for row in rows:
+            cells = row.get("cells") or []
+            if idx >= len(cells) or not str(cells[idx]).strip():
+                continue
+            if target is not None:
+                if xidx is not None and xidx < len(cells):
+                    if _fnum(cells[xidx]) != target:
+                        continue
+                elif target not in [c for c in (_fnum(x) for x in cells) if c is not None]:
+                    continue
+            value = str(cells[idx]).strip()
+            quote = row.get("row_quote") or ""
+            if value not in quote:
+                continue
+            return _figure_row(
+                field, "reported", value, quote, row.get("page_anchor"),
+                unit=header[idx].get("unit"),
+                note="从表格 %s 第 %s 行按列「%s」取值；行引文逐字保留"
+                     % (t.get("id"), row.get("row"), header[idx].get("name")))
+    return None
+
+
+def _tick_figure_row(field, doc):
+    desc = (field.get("description") or "").lower()
+    if not re.search(r"tick|刻度值|刻度起点|刻度间隔|tick label", desc):
+        return None
+    return _figure_row(
+        field, "not_reported", None, None, None,
+        note="刻度值需要像素级读数/OCR；本 Skill 不做图像像素读取，按 not_reported 处理，不臆造刻度")
+
+
+def figure_field_row(field, doc):
+    """图表结构可确定回答的字段优先走这里；不匹配返回 None 交给通用抽取。"""
+    for fn in (_axis_figure_row, _caption_sample_size, _tick_figure_row,
+               _table_figure_row):
+        try:
+            row = fn(field, doc)
+        except Exception:
+            row = None
+        if row is not None:
+            return row
+    return None
+
+
 def run(input_dir, doc, work_dir):
     """按字段表抽取，返回 {fields, review_sheet, meta}。"""
     spec, spec_path = load_target_fields(input_dir)
@@ -1567,7 +1718,10 @@ def run(input_dir, doc, work_dir):
     rows = []
     for f in fields:
         try:
-            rows.append(extract_field(f, sentences, lex, units))
+            row = figure_field_row(f, doc)
+            if row is None:
+                row = extract_field(f, sentences, lex, units)
+            rows.append(row)
         except Exception as exc:  # noqa: BLE001
             row = _row(f, STATUS_FAILED, "general", 0.0,
                        note="抽取过程异常（%s），记为 extraction_failed，需人工接管。" % exc)
